@@ -1,11 +1,13 @@
 """
-rebalancer.py — Multi-sleeve rebalancing engine (Modes A, B, C).
+rebalancer.py — Multi-sleeve rebalancing engine (Modes A, B, C)
+with dividend event tracking (DRIP / Cash accrual).
 """
 
 from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass, field
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -33,6 +35,29 @@ class TradeRecord:
 
 
 # ---------------------------------------------------------------------------
+# Dividend record (separate from trades for clarity)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class DividendRecord:
+    """Tracks a single dividend / distribution event."""
+    ex_dividend_date: dt.date = dt.date.today()
+    payment_date: dt.date = dt.date.today()
+    payment_date_source: str = "Estimated"  # "FMP" / "Estimated"
+    declaration_date: Optional[dt.date] = None
+    record_date: Optional[dt.date] = None
+    sleeve_name: str = ""
+    ticker: str = ""
+    dividend_per_share: float = 0.0
+    shares_held: float = 0.0
+    gross_amount: float = 0.0
+    treatment: str = "DRIP"  # "DRIP" / "Cash"
+    drip_shares: float = 0.0
+    drip_price: float = 0.0
+    cash_added: float = 0.0
+
+
+# ---------------------------------------------------------------------------
 # Sleeve state during simulation
 # ---------------------------------------------------------------------------
 
@@ -42,6 +67,8 @@ class SleeveState:
     positions: dict[str, float] = field(default_factory=dict)  # ticker → shares
     cash: float = 0.0
     prev_stock_value: float = 0.0  # for Mode B tracking
+    # Pending DRIP amounts: ticker → [(payment_date, dollar_amount), ...]
+    pending_drip: dict[str, list] = field(default_factory=dict)
 
     def position_value(self, prices: dict[str, float]) -> dict[str, float]:
         """Dollar value per ticker."""
@@ -300,14 +327,23 @@ def rebalance_mode_c(
     config: PortfolioConfig,
     tx_cost_pct: float,
     contribution_cash: float = 0.0,
+    yield_data: Optional[dict[str, float]] = None,
 ) -> list[TradeRecord]:
-    """Evaluate custom formula and apply signal-based trade logic."""
+    """Evaluate custom formula and apply signal-based trade logic.
+
+    *yield_data* is an optional ``{ticker: yield_decimal}`` mapping that
+    supplies real distribution yields for the ``portfolio["X"].yield_ttm``
+    variable in the formula sandbox.
+    """
     trades: list[TradeRecord] = []
     sleeve = state.sleeve
     state.cash += contribution_cash
 
     if not sleeve.custom_formula.strip():
         return trades
+
+    if yield_data is None:
+        yield_data = {}
 
     # Build sandboxed evaluation context
     aeval = Interpreter()
@@ -318,10 +354,7 @@ def rebalance_mode_c(
             self.price = prices.get(ticker, 0.0)
             self.shares = state.positions.get(ticker, 0.0)
             self.value = self.price * self.shares
-            h = config.holding_by_ticker(ticker)
-            self.yield_ttm = 0.0
-            if h:
-                self.yield_ttm = 0.0  # would need live yield data
+            self.yield_ttm = yield_data.get(ticker, 0.0)
 
     class _PortfolioProxy:
         def __init__(self):
@@ -422,6 +455,7 @@ def apply_rebalancing(
     date: dt.date,
     config: PortfolioConfig,
     contribution_cash: float = 0.0,
+    yield_data: Optional[dict[str, float]] = None,
 ) -> list[TradeRecord]:
     """Dispatch to the correct rebalancing mode for this sleeve."""
     sleeve = state.sleeve
@@ -444,6 +478,9 @@ def apply_rebalancing(
     elif mode.startswith("B"):
         return rebalance_mode_b(state, prices, date, tx, contribution_cash)
     elif mode.startswith("C"):
-        return rebalance_mode_c(state, prices, date, config, tx, contribution_cash)
+        return rebalance_mode_c(
+            state, prices, date, config, tx, contribution_cash,
+            yield_data=yield_data,
+        )
 
     return []

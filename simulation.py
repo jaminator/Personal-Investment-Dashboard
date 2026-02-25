@@ -1,5 +1,6 @@
 """
-simulation.py — Monte Carlo simulation engine (GBM and Bootstrap).
+simulation.py — Monte Carlo simulation engine (GBM and Bootstrap)
+with dividend-adjusted total returns.
 """
 
 from __future__ import annotations
@@ -19,6 +20,8 @@ from data_fetcher import (
     cagr,
     covariance_matrix,
     fetch_returns,
+    fetch_total_returns,
+    compute_standardized_yield,
     lookback_start_date,
 )
 from portfolio import PortfolioConfig
@@ -32,7 +35,8 @@ def portfolio_return_params(
     config: PortfolioConfig,
 ) -> tuple[float, float]:
     """Return (annualized expected return, annualized volatility) for the
-    portfolio, either from historical data or manual inputs."""
+    portfolio, using **total returns** (price + dividends) from historical
+    data, or manual inputs."""
 
     if config.return_source == "Manual":
         return config.manual_return, config.manual_volatility
@@ -42,7 +46,12 @@ def portfolio_return_params(
         return config.manual_return, config.manual_volatility
 
     start = lookback_start_date(config.lookback_period)
-    rets = fetch_returns(tickers, start=start)
+
+    # Use total returns (price + dividends) instead of price-only
+    rets = fetch_total_returns(tickers, start=start)
+    if rets.empty:
+        # Fallback to price-only returns
+        rets = fetch_returns(tickers, start=start)
     if rets.empty:
         return config.manual_return, config.manual_volatility
 
@@ -56,6 +65,23 @@ def portfolio_return_params(
     port_series = pd.Series(port_rets, index=rets.index)
     mu, sigma = annualized_return_vol(port_series)
     return mu, sigma
+
+
+def portfolio_dividend_yield(config: PortfolioConfig) -> float:
+    """Compute the weighted-average annual distribution yield for the
+    portfolio, using the standardized formula per holding."""
+    tickers = config.tickers()
+    if not tickers:
+        return 0.0
+    w = config.weights()
+    total_yield = 0.0
+    for t in tickers:
+        weight = w.get(t, 0.0)
+        h = config.holding_by_ticker(t)
+        override = h.distributions_per_year_override if h else 0
+        y, _, _ = compute_standardized_yield(t, override_freq=override)
+        total_yield += weight * y
+    return total_yield
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +143,8 @@ def monte_carlo_bootstrap(
     withdrawal_schedule: pd.DataFrame,
     start_date: dt.date,
 ) -> np.ndarray:
-    """Run bootstrap Monte Carlo by resampling historical daily returns."""
+    """Run bootstrap Monte Carlo by resampling historical daily *total*
+    returns (price + dividends)."""
     tickers = config.tickers()
     if not tickers:
         mu, sigma = config.manual_return, config.manual_volatility
@@ -127,7 +154,11 @@ def monte_carlo_bootstrap(
         )
 
     start_str = lookback_start_date(config.lookback_period)
-    rets = fetch_returns(tickers, start=start_str)
+
+    # Use total returns for bootstrap
+    rets = fetch_total_returns(tickers, start=start_str)
+    if rets.empty or len(rets) < 20:
+        rets = fetch_returns(tickers, start=start_str)
     if rets.empty or len(rets) < 20:
         mu, sigma = config.manual_return, config.manual_volatility
         return monte_carlo_gbm(
@@ -231,6 +262,11 @@ def run_simulation(config: PortfolioConfig) -> dict:
     median_ending = float(p50[-1])
     estimated_returns = median_ending - initial_value - total_contributions + total_withdrawals
 
+    # Compute projected annual dividend income
+    div_yield = portfolio_dividend_yield(config)
+    avg_portfolio_size = float((initial_value + median_ending) / 2)
+    projected_annual_div_income = avg_portfolio_size * div_yield
+
     return {
         "dates": list(dates),
         "paths": paths,
@@ -251,4 +287,6 @@ def run_simulation(config: PortfolioConfig) -> dict:
         "sigma": sigma,
         "contrib_schedule": contrib_sched,
         "withdrawal_schedule": withdrawal_sched,
+        "dividend_yield": div_yield,
+        "projected_annual_div_income": projected_annual_div_income,
     }

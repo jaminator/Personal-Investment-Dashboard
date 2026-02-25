@@ -1,5 +1,6 @@
 """
-ui_holdings.py — Portfolio Holdings Management UI (Feature 1).
+ui_holdings.py — Portfolio Holdings Management UI (Feature 1)
+with per-holding dividend settings (DRIP toggle, yield, frequency).
 """
 
 from __future__ import annotations
@@ -11,7 +12,12 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from data_fetcher import fetch_current_price
+from data_fetcher import (
+    compute_standardized_yield,
+    detect_distribution_frequency,
+    fetch_current_price,
+    fetch_dividend_history,
+)
 from portfolio import ASSET_CLASSES, Holding, PortfolioConfig, default_portfolio
 
 
@@ -108,6 +114,17 @@ def render_holdings(config: PortfolioConfig) -> None:
 
     rows = []
     for h in config.holdings:
+        # Compute dividend yield and frequency for non-manual holdings
+        div_yield_str = "—"
+        freq_str = "—"
+        if not h.is_manual and h.ticker:
+            override = h.distributions_per_year_override
+            y, dpy, freq_label = compute_standardized_yield(h.ticker, override_freq=override)
+            if y > 0:
+                div_yield_str = f"{y:.2%}"
+            if freq_label != "Unknown":
+                freq_str = freq_label
+
         rows.append({
             "ID": h.id,
             "Ticker": h.ticker if not h.is_manual else f"[Manual] {h.ticker or 'N/A'}",
@@ -117,12 +134,72 @@ def render_holdings(config: PortfolioConfig) -> None:
             "Market Value": _fmt(h.market_value),
             "Unrealized G/L ($)": _fmt(h.unrealized_gl),
             "Unrealized G/L (%)": _pct(h.unrealized_gl_pct),
+            "Div Yield": div_yield_str,
+            "Dist Freq": freq_str,
+            "DRIP": "On" if h.drip_enabled else "Off",
             "Asset Class": h.asset_class,
             "% of Portfolio": _pct(h.market_value / total_val) if total_val > 0 else "0.00%",
         })
 
     df = pd.DataFrame(rows)
     st.dataframe(df.drop(columns=["ID"]), use_container_width=True, hide_index=True)
+
+    # --- Per-holding dividend settings --------------------------------------
+    st.subheader("Dividend Settings")
+    st.caption(
+        "Configure DRIP (dividend reinvestment) and distribution "
+        "frequency per holding.  Frequency is auto-detected from "
+        "trailing 12-month dividend history; override if needed."
+    )
+    for h in config.holdings:
+        if h.is_manual:
+            continue
+        with st.expander(f"{h.ticker} — Dividend Settings", expanded=False):
+            c1, c2 = st.columns(2)
+            with c1:
+                drip = st.toggle(
+                    "Reinvest Distributions (DRIP)",
+                    value=h.drip_enabled,
+                    key=f"drip_{h.id}",
+                    help="DRIP: dividends buy additional shares on payment date. "
+                         "Off: dividends accrue to sleeve cash balance.",
+                )
+                h.drip_enabled = drip
+            with c2:
+                offset = st.number_input(
+                    "Payment date offset (calendar days after ex-date)",
+                    min_value=1,
+                    max_value=60,
+                    value=h.payment_date_offset,
+                    step=1,
+                    key=f"offset_{h.id}",
+                    help="Used when FMP data is unavailable. "
+                         "Monthly funds: ~15 days. Quarterly: ~20 days.",
+                )
+                h.payment_date_offset = offset
+
+            c3, c4 = st.columns(2)
+            with c3:
+                freq_override = st.number_input(
+                    "Override distributions/year (0 = auto-detect)",
+                    min_value=0,
+                    max_value=365,
+                    value=h.distributions_per_year_override,
+                    step=1,
+                    key=f"freq_{h.id}",
+                    help="Common values: 12 (monthly), 4 (quarterly), "
+                         "2 (semi-annual), 1 (annual).",
+                )
+                h.distributions_per_year_override = freq_override
+            with c4:
+                # Show auto-detected frequency
+                if h.ticker:
+                    divs = fetch_dividend_history(h.ticker)
+                    if not divs.empty:
+                        label, dpy = detect_distribution_frequency(divs)
+                        st.info(f"Detected: {label} ({dpy}x/year)")
+                    else:
+                        st.info("No dividend history found")
 
     # --- Remove holdings ----------------------------------------------------
     st.subheader("Remove Holdings")
