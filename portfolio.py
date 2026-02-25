@@ -56,6 +56,11 @@ class Holding:
     manual_expected_return: float = 0.07
     current_price: float = 0.0
 
+    # Dividend settings
+    drip_enabled: bool = True  # True = reinvest, False = accrue to cash
+    payment_date_offset: int = 20  # calendar days after ex-date (fallback)
+    distributions_per_year_override: int = 0  # 0 = auto-detect
+
     @property
     def market_value(self) -> float:
         if self.is_manual:

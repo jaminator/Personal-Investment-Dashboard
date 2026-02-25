@@ -1,5 +1,5 @@
 """
-ui_backtest.py — Backtesting UI (Feature 6).
+ui_backtest.py — Backtesting UI (Feature 6) with dividend event display.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import streamlit as st
 from analytics import compute_analytics, drawdown_series
 from backtester import BacktestResult, run_backtest, run_yield_sensitivity
 from portfolio import PortfolioConfig
+from rebalancer import DividendRecord
 
 
 def _fmt(val: float) -> str:
@@ -195,6 +196,33 @@ def render_backtest(config: PortfolioConfig) -> None:
                 hovermode="x unified",
             )
             st.plotly_chart(fig_sig, use_container_width=True)
+
+    # --- Dividend log -------------------------------------------------------
+    if result.dividend_log:
+        st.subheader("Dividend / Distribution Log")
+        total_divs = sum(dr.gross_amount for dr in result.dividend_log)
+        st.metric("Total Dividends Received", _fmt(total_divs))
+
+        div_rows = []
+        for dr in result.dividend_log:
+            div_rows.append({
+                "Ex-Div Date": str(dr.ex_dividend_date),
+                "Payment Date": str(dr.payment_date),
+                "Pay Date Src": dr.payment_date_source,
+                "Decl. Date": str(dr.declaration_date) if dr.declaration_date else "—",
+                "Record Date": str(dr.record_date) if dr.record_date else "—",
+                "Sleeve": dr.sleeve_name,
+                "Ticker": dr.ticker,
+                "Div/Share": f"${dr.dividend_per_share:.4f}",
+                "Shares Held": f"{dr.shares_held:.4f}",
+                "Gross $": _fmt(dr.gross_amount),
+                "Treatment": dr.treatment,
+                "DRIP Shares": f"{dr.drip_shares:.4f}" if dr.drip_shares > 0 else "—",
+                "DRIP Price": _fmt(dr.drip_price) if dr.drip_price > 0 else "—",
+                "Cash Added": _fmt(dr.cash_added) if dr.cash_added > 0 else "—",
+            })
+        df_divs = pd.DataFrame(div_rows)
+        st.dataframe(df_divs, use_container_width=True, hide_index=True)
 
     # --- Yield sensitivity (Mode B) ----------------------------------------
     mode_b_sleeves = [s for s in config.sleeves if s.mode.startswith("B")]

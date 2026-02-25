@@ -49,16 +49,24 @@ def render_future_value(config: PortfolioConfig) -> None:
     with col4:
         st.metric("P(Ruin)", f"{result['prob_ruin']:.1%}")
 
-    col5, col6, col7 = st.columns(3)
+    col5, col6, col7, col8 = st.columns(4)
     with col5:
         st.metric("Total Contributions", _fmt(result["total_contributions"]))
     with col6:
         st.metric("Total Withdrawals", _fmt(result["total_withdrawals"]))
     with col7:
         st.metric("Est. Investment Returns", _fmt(result["estimated_returns"]))
+    with col8:
+        div_income = result.get("projected_annual_div_income", 0.0)
+        div_yield = result.get("dividend_yield", 0.0)
+        st.metric(
+            "Proj. Annual Div Income",
+            _fmt(div_income),
+            delta=f"{div_yield:.2%} yield" if div_yield > 0 else None,
+        )
 
     st.caption(
-        f"Assumptions: {result['mu']:.2%} annual return, "
+        f"Assumptions: {result['mu']:.2%} annual return (total, incl. dividends), "
         f"{result['sigma']:.2%} volatility, "
         f"{config.num_simulations:,} simulations ({config.simulation_method})"
     )

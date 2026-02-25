@@ -7,6 +7,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from data_fetcher import compute_standardized_yield
 from portfolio import (
     FREQUENCIES,
     REBALANCE_MODES,
@@ -200,6 +201,17 @@ def _render_sleeve_config(config: PortfolioConfig, sleeve: Sleeve) -> None:
             key=f"{key_prefix}_yield",
         )
 
+        # Show actual trailing yields for assigned holdings
+        if holding_tickers:
+            yield_info = []
+            for ht in holding_tickers:
+                y, dpy, freq = compute_standardized_yield(ht)
+                if y > 0:
+                    yield_info.append(f"{ht}: {y:.2%} ({freq})")
+                else:
+                    yield_info.append(f"{ht}: no yield data")
+            st.caption("Actual TTM yields: " + " | ".join(yield_info))
+
         sleeve.signal_frequency = st.selectbox(
             "Rebalancing Frequency",
             FREQUENCIES,
@@ -234,11 +246,25 @@ def _render_sleeve_config(config: PortfolioConfig, sleeve: Sleeve) -> None:
         st.markdown("**Custom Formula Rebalancing**")
         st.caption(
             "Enter a Python expression. Available variables: "
-            "`portfolio[\"TICKER\"].value`, `.price`, `.shares`, `.yield_ttm`; "
+            "`portfolio[\"TICKER\"].value`, `.price`, `.shares`, "
+            "`.yield_ttm` (real trailing distribution yield from yfinance); "
             "`portfolio.total_value`; `date`; `cash`. "
             "Positive result → BUY first holding, SELL second. "
             "Negative → reverse."
         )
+
+        # Show current yield_ttm values for assigned tickers
+        formula_tickers = [
+            config.holding_by_id(hid).ticker
+            for hid in sleeve.holding_ids
+            if config.holding_by_id(hid) and config.holding_by_id(hid).ticker
+        ]
+        if formula_tickers:
+            yield_info = []
+            for ft in formula_tickers:
+                y, dpy, freq = compute_standardized_yield(ft)
+                yield_info.append(f"{ft}.yield_ttm = {y:.4f} ({freq})")
+            st.info("Current yield values: " + " | ".join(yield_info))
         sleeve.custom_formula = st.text_area(
             "Formula",
             value=sleeve.custom_formula,

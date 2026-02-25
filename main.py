@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import streamlit as st
 
+from data_fetcher import validate_fmp_key
 from portfolio import PortfolioConfig, default_portfolio
 from ui_analytics import render_analytics
 from ui_backtest import render_backtest
@@ -62,8 +63,44 @@ with st.sidebar:
     st.markdown("---")
     render_simulation_settings(config)
 
+    # --- FMP API Key Configuration -----------------------------------------
     st.markdown("---")
-    st.caption("Investment Portfolio Dashboard v1.0")
+    st.subheader("API Keys")
+
+    # Read existing key from secrets or session state
+    existing_key = ""
+    try:
+        existing_key = st.secrets.get("FMP_API_KEY", "")
+    except Exception:
+        pass
+    if not existing_key:
+        existing_key = st.session_state.get("fmp_api_key", "")
+
+    fmp_key = st.text_input(
+        "FMP API Key",
+        value=existing_key,
+        type="password",
+        help="Financial Modeling Prep free-tier key (250 req/day). "
+             "Used for accurate dividend payment dates.",
+        key="fmp_key_input",
+    )
+    if fmp_key != st.session_state.get("fmp_api_key", ""):
+        st.session_state["fmp_api_key"] = fmp_key
+
+    # Show FMP connection status
+    if fmp_key:
+        status = validate_fmp_key(fmp_key)
+        if status == "valid":
+            st.markdown(":white_check_mark: FMP connected")
+        elif status == "invalid":
+            st.markdown(":red_circle: FMP key invalid or rate-limited")
+        else:
+            st.markdown(":red_circle: FMP connection error")
+    else:
+        st.markdown(":warning: No FMP key — using estimated payment dates")
+
+    st.markdown("---")
+    st.caption("Investment Portfolio Dashboard v2.0 — Dividends")
 
 # ---------------------------------------------------------------------------
 # Main area
