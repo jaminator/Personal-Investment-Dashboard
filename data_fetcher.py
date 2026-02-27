@@ -237,69 +237,37 @@ def get_dividend_events(
 ) -> pd.DataFrame:
     """Return a comprehensive dividend events table for *ticker*.
 
-    Merges yfinance (primary) with FMP (fallback for payment dates).
+    Delegates to the **verified** dividend layer which cross-validates
+    across yfinance, FMP, SEC EDGAR, and PIMCO.
+
     Columns: ex_dividend_date, declaration_date, record_date,
              payment_date, payment_date_source, dividend_per_share
     """
-    yf_divs = fetch_dividend_history(ticker, start=start, end=end)
-    if yf_divs.empty:
+    from dividend_verifier import get_verified_dividend_events
+
+    start_date = dt.date.fromisoformat(start) if start else None
+    end_date = dt.date.fromisoformat(end) if end else None
+
+    events = get_verified_dividend_events(ticker, start_date=start_date, end_date=end_date)
+
+    if not events:
         return pd.DataFrame(columns=[
             "ex_dividend_date", "declaration_date", "record_date",
             "payment_date", "payment_date_source", "dividend_per_share",
         ])
 
-    # Build base rows from yfinance
     rows = []
-    for ex_date_ts, div_amount in yf_divs.items():
-        ex_date = ex_date_ts.date() if hasattr(ex_date_ts, "date") else ex_date_ts
+    for ev in events:
         rows.append({
-            "ex_dividend_date": ex_date,
-            "declaration_date": None,
-            "record_date": None,
-            "payment_date": None,
-            "payment_date_source": "Estimated",
-            "dividend_per_share": float(div_amount),
+            "ex_dividend_date": ev.ex_dividend_date,
+            "declaration_date": ev.declaration_date,
+            "record_date": ev.record_date,
+            "payment_date": ev.payment_date,
+            "payment_date_source": ev.payment_date_source,
+            "dividend_per_share": ev.distribution_per_share,
         })
 
-    df = pd.DataFrame(rows)
-
-    # Try FMP enrichment
-    api_key = _get_fmp_api_key()
-    if api_key:
-        fmp_df = fetch_fmp_dividends(ticker, api_key)
-        if not fmp_df.empty:
-            # Build lookup by ex-date
-            fmp_lookup = {}
-            for _, frow in fmp_df.iterrows():
-                fmp_lookup[frow["ex_dividend_date"]] = frow
-
-            for idx, row in df.iterrows():
-                ex_d = row["ex_dividend_date"]
-                fmp_row = fmp_lookup.get(ex_d)
-                if fmp_row is not None:
-                    if fmp_row.get("declaration_date"):
-                        df.at[idx, "declaration_date"] = fmp_row["declaration_date"]
-                    if fmp_row.get("record_date"):
-                        df.at[idx, "record_date"] = fmp_row["record_date"]
-                    if fmp_row.get("payment_date"):
-                        df.at[idx, "payment_date"] = fmp_row["payment_date"]
-                        df.at[idx, "payment_date_source"] = "FMP"
-
-    # Fill missing payment dates with offset estimate
-    for idx, row in df.iterrows():
-        if row["payment_date"] is None:
-            ex_d = row["ex_dividend_date"]
-            df.at[idx, "payment_date"] = ex_d + dt.timedelta(days=payment_date_offset)
-            df.at[idx, "payment_date_source"] = "Estimated"
-        # Fill missing record date: ex-date + 1 business day
-        if row["record_date"] is None:
-            ex_d = row["ex_dividend_date"]
-            rd = ex_d + dt.timedelta(days=1)
-            while rd.weekday() >= 5:
-                rd += dt.timedelta(days=1)
-            df.at[idx, "record_date"] = rd
-
-    return df.sort_values("ex_dividend_date").reset_index(drop=True)
+    return pd.DataFrame(rows).sort_values("ex_dividend_date").reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
@@ -340,38 +308,60 @@ def compute_standardized_yield(
     ticker: str,
     override_freq: int = 0,
 ) -> tuple[float, int, str]:
-    """Compute the standardized annualized distribution yield.
+    """Compute the standardized annualized distribution yield using
+    the **verified** dividend data layer.
 
     Formula: last_single_div * distributions_per_year / current_price
 
     Returns ``(yield_decimal, distributions_per_year, frequency_label)``.
     """
-    divs = fetch_dividend_history(ticker)
-    if divs.empty:
-        return 0.0, 0, "Unknown"
+    from dividend_verifier import get_latest_distribution
 
-    freq_label, dpy = detect_distribution_frequency(divs)
+    latest = get_latest_distribution(ticker)
+    if latest is None or latest.distribution_per_share <= 0:
+        # Fallback to raw yfinance if verification layer returns nothing
+        divs = fetch_dividend_history(ticker)
+        if divs.empty:
+            return 0.0, 0, "Unknown"
+        freq_label, dpy = detect_distribution_frequency(divs)
+        if override_freq > 0:
+            dpy = override_freq
+        if dpy == 0:
+            return 0.0, 0, freq_label
+        last_div = float(divs.iloc[-1])
+        price = fetch_current_price(ticker)
+        if not price or price <= 0:
+            return 0.0, dpy, freq_label
+        ann_yield = (last_div * dpy) / price
+        return ann_yield, dpy, _freq_label(dpy, freq_label)
+
+    dpy = latest.frequency
     if override_freq > 0:
         dpy = override_freq
-        if dpy == 12:
-            freq_label = "Monthly"
-        elif dpy == 4:
-            freq_label = "Quarterly"
-        elif dpy == 2:
-            freq_label = "Semi-Annual"
-        elif dpy == 1:
-            freq_label = "Annual"
 
+    freq_label = _freq_label(dpy)
     if dpy == 0:
         return 0.0, 0, freq_label
 
-    last_div = float(divs.iloc[-1])
     price = fetch_current_price(ticker)
     if not price or price <= 0:
         return 0.0, dpy, freq_label
 
-    ann_yield = (last_div * dpy) / price
+    ann_yield = (latest.distribution_per_share * dpy) / price
     return ann_yield, dpy, freq_label
+
+
+def _freq_label(dpy: int, fallback: str = "Unknown") -> str:
+    """Convert distributions per year to a frequency label."""
+    if dpy >= 12:
+        return "Monthly"
+    elif dpy == 4:
+        return "Quarterly"
+    elif dpy == 2:
+        return "Semi-Annual"
+    elif dpy == 1:
+        return "Annual"
+    return fallback
 
 
 # ---------------------------------------------------------------------------
@@ -491,15 +481,22 @@ def fetch_risk_free_rate() -> float:
 def fetch_distribution_yield(ticker: str) -> Optional[float]:
     """Fetch trailing twelve-month distribution yield for *ticker*.
 
-    Uses the standardized formula (last div * freq / price) when possible,
-    falling back to yfinance info fields.
+    Uses the verified dividend layer (compute_annualized_yield) when
+    possible, falling back to standardized formula and yfinance info fields.
     """
-    # Try standardized computation first
+    from dividend_verifier import compute_annualized_yield as verified_yield
+
+    # Try verified computation first
+    v_yield = verified_yield(ticker)
+    if v_yield is not None and v_yield > 0:
+        return v_yield
+
+    # Fallback to standardized computation
     std_yield, dpy, _ = compute_standardized_yield(ticker)
     if std_yield > 0:
         return std_yield
 
-    # Fallback to yfinance info
+    # Last resort: yfinance info
     try:
         tk = yf.Ticker(ticker)
         info = tk.info

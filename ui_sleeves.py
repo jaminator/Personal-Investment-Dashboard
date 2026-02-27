@@ -8,6 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from data_fetcher import compute_standardized_yield
+from dividend_verifier import compute_annualized_yield as verified_yield
 from portfolio import (
     FREQUENCIES,
     REBALANCE_MODES,
@@ -201,12 +202,15 @@ def _render_sleeve_config(config: PortfolioConfig, sleeve: Sleeve) -> None:
             key=f"{key_prefix}_yield",
         )
 
-        # Show actual trailing yields for assigned holdings
+        # Show actual trailing yields for assigned holdings (verified)
         if holding_tickers:
             yield_info = []
             for ht in holding_tickers:
+                vy = verified_yield(ht)
                 y, dpy, freq = compute_standardized_yield(ht)
-                if y > 0:
+                if vy is not None and vy > 0:
+                    yield_info.append(f"{ht}: {vy:.2%} ({freq}, verified)")
+                elif y > 0:
                     yield_info.append(f"{ht}: {y:.2%} ({freq})")
                 else:
                     yield_info.append(f"{ht}: no yield data")
@@ -262,8 +266,11 @@ def _render_sleeve_config(config: PortfolioConfig, sleeve: Sleeve) -> None:
         if formula_tickers:
             yield_info = []
             for ft in formula_tickers:
+                vy = verified_yield(ft)
                 y, dpy, freq = compute_standardized_yield(ft)
-                yield_info.append(f"{ft}.yield_ttm = {y:.4f} ({freq})")
+                effective = vy if vy is not None and vy > 0 else y
+                verified_tag = " (verified)" if vy is not None and vy > 0 else ""
+                yield_info.append(f"{ft}.yield_ttm = {effective:.4f} ({freq}{verified_tag})")
             st.info("Current yield values: " + " | ".join(yield_info))
         sleeve.custom_formula = st.text_area(
             "Formula",

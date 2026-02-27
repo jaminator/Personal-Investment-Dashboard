@@ -69,7 +69,9 @@ def portfolio_return_params(
 
 def portfolio_dividend_yield(config: PortfolioConfig) -> float:
     """Compute the weighted-average annual distribution yield for the
-    portfolio, using the standardized formula per holding."""
+    portfolio, using the **verified** dividend layer per holding."""
+    from dividend_verifier import compute_annualized_yield as verified_yield
+
     tickers = config.tickers()
     if not tickers:
         return 0.0
@@ -77,9 +79,13 @@ def portfolio_dividend_yield(config: PortfolioConfig) -> float:
     total_yield = 0.0
     for t in tickers:
         weight = w.get(t, 0.0)
-        h = config.holding_by_ticker(t)
-        override = h.distributions_per_year_override if h else 0
-        y, _, _ = compute_standardized_yield(t, override_freq=override)
+        # Try verified yield first
+        y = verified_yield(t)
+        if y is None or y <= 0:
+            # Fallback to standardized formula
+            h = config.holding_by_ticker(t)
+            override = h.distributions_per_year_override if h else 0
+            y, _, _ = compute_standardized_yield(t, override_freq=override)
         total_yield += weight * y
     return total_yield
 

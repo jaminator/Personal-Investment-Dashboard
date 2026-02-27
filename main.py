@@ -16,6 +16,7 @@ from ui_contributions import render_contributions
 from ui_future_value import render_future_value
 from ui_holdings import render_holdings
 from ui_simulation import render_simulation_settings
+from ui_data_quality import render_data_quality
 from ui_sleeves import render_sleeves
 
 
@@ -56,6 +57,7 @@ with st.sidebar:
             "Future Value",
             "Backtest",
             "Analytics",
+            "Data Quality",
         ],
         index=0,
     )
@@ -100,7 +102,7 @@ with st.sidebar:
         st.markdown(":warning: No FMP key — using estimated payment dates")
 
     st.markdown("---")
-    st.caption("Investment Portfolio Dashboard v2.0 — Dividends")
+    st.caption("Investment Portfolio Dashboard v3.0 — Verified Dividends")
 
 # ---------------------------------------------------------------------------
 # Main area
@@ -118,3 +120,5 @@ elif page == "Backtest":
     render_backtest(config)
 elif page == "Analytics":
     render_analytics(config)
+elif page == "Data Quality":
+    render_data_quality(config)
