@@ -18,6 +18,7 @@ from data_fetcher import (
     fetch_current_price,
     fetch_dividend_history,
 )
+from dividend_verifier import get_latest_distribution
 from portfolio import ASSET_CLASSES, Holding, PortfolioConfig, default_portfolio
 
 
@@ -114,9 +115,10 @@ def render_holdings(config: PortfolioConfig) -> None:
 
     rows = []
     for h in config.holdings:
-        # Compute dividend yield and frequency for non-manual holdings
+        # Compute dividend yield and frequency using verified layer
         div_yield_str = "—"
         freq_str = "—"
+        verified_str = "—"
         if not h.is_manual and h.ticker:
             override = h.distributions_per_year_override
             y, dpy, freq_label = compute_standardized_yield(h.ticker, override_freq=override)
@@ -124,6 +126,10 @@ def render_holdings(config: PortfolioConfig) -> None:
                 div_yield_str = f"{y:.2%}"
             if freq_label != "Unknown":
                 freq_str = freq_label
+            # Check verification status from verified layer
+            latest = get_latest_distribution(h.ticker)
+            if latest:
+                verified_str = "Y" if latest.amount_verified else "N"
 
         rows.append({
             "ID": h.id,
@@ -136,6 +142,7 @@ def render_holdings(config: PortfolioConfig) -> None:
             "Unrealized G/L (%)": _pct(h.unrealized_gl_pct),
             "Div Yield": div_yield_str,
             "Dist Freq": freq_str,
+            "Verified": verified_str,
             "DRIP": "On" if h.drip_enabled else "Off",
             "Asset Class": h.asset_class,
             "% of Portfolio": _pct(h.market_value / total_val) if total_val > 0 else "0.00%",

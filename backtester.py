@@ -150,11 +150,16 @@ def run_backtest(config: PortfolioConfig) -> BacktestResult:
         if h.ticker:
             drip_settings[h.ticker] = h.drip_enabled
 
-    # Pre-compute real yield data for Mode C formulas
+    # Pre-compute real yield data for Mode C formulas (verified layer)
+    from dividend_verifier import compute_annualized_yield as verified_yield
     yield_data: dict[str, float] = {}
     for t in tickers:
-        y, _, _ = compute_standardized_yield(t)
-        yield_data[t] = y
+        vy = verified_yield(t)
+        if vy is not None and vy > 0:
+            yield_data[t] = vy
+        else:
+            y, _, _ = compute_standardized_yield(t)
+            yield_data[t] = y
 
     # Build contribution/withdrawal schedules
     contrib_sched = build_contribution_schedule(
