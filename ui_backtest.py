@@ -132,19 +132,53 @@ def render_backtest(config: PortfolioConfig) -> None:
     # --- Trade log ----------------------------------------------------------
     if result.trade_log:
         st.subheader("Trade Log")
+
+        # View toggle: summary vs full audit trail
+        view_mode = st.radio(
+            "Trade log detail", ["Summary", "Full Audit Trail"],
+            horizontal=True, key="trade_log_view",
+        )
+
         trade_rows = []
         for tr in result.trade_log:
-            trade_rows.append({
-                "Date": str(tr.date),
-                "Sleeve": tr.sleeve_name,
-                "Ticker": tr.ticker,
-                "Direction": tr.direction,
-                "Shares": f"{tr.shares:.4f}",
-                "Amount": _fmt(tr.dollar_amount),
-                "Signal": _fmt(tr.signal_amount) if tr.signal_amount else "—",
-                "Tx Cost": _fmt(tr.transaction_cost),
-                "Note": tr.note or "—",
-            })
+            if view_mode == "Summary":
+                trade_rows.append({
+                    "Date": str(tr.date),
+                    "Sleeve": tr.sleeve_name,
+                    "Event": getattr(tr, "event_type", ""),
+                    "Ticker": tr.ticker,
+                    "Action": tr.direction,
+                    "Shares": f"{tr.shares:.4f}",
+                    "Amount": _fmt(tr.dollar_amount),
+                    "Tx Cost": _fmt(tr.transaction_cost),
+                    "Cash After": _fmt(getattr(tr, "cash_after", 0.0)),
+                    "Pair ID": getattr(tr, "paired_trade_id", "")[:8] or "—",
+                    "Signal": _fmt(tr.signal_amount) if tr.signal_amount else "—",
+                    "Note": tr.note or "—",
+                })
+            else:
+                trade_rows.append({
+                    "Date": str(tr.date),
+                    "Sleeve": tr.sleeve_name,
+                    "Event": getattr(tr, "event_type", ""),
+                    "Ticker": tr.ticker,
+                    "Action": tr.direction,
+                    "Shares Before": f"{getattr(tr, 'shares_before', 0.0):.4f}",
+                    "Shares After": f"{getattr(tr, 'shares_after', 0.0):.4f}",
+                    "Share Delta": f"{getattr(tr, 'share_delta', 0.0):+.4f}",
+                    "Exec Price": _fmt(getattr(tr, "execution_price", 0.0)),
+                    "Gross Value": _fmt(getattr(tr, "gross_trade_value", 0.0)),
+                    "Tx Cost": _fmt(tr.transaction_cost),
+                    "Net Cash Impact": f"${getattr(tr, 'net_cash_impact', 0.0):+,.2f}",
+                    "Cash Before": _fmt(getattr(tr, "cash_before", 0.0)),
+                    "Cash After": _fmt(getattr(tr, "cash_after", 0.0)),
+                    "Funding": getattr(tr, "funding_source", "") or "—",
+                    "Pair ID": getattr(tr, "paired_trade_id", "")[:8] or "—",
+                    "Signal": _fmt(tr.signal_amount) if tr.signal_amount else "—",
+                    "Guard": "YES" if getattr(tr, "guard_active", False) else "—",
+                    "Shortfall": _fmt(getattr(tr, "shortfall_amount", 0.0)) if getattr(tr, "shortfall_amount", 0.0) > 0 else "—",
+                    "Note": tr.note or "—",
+                })
         df_trades = pd.DataFrame(trade_rows)
         st.dataframe(df_trades, use_container_width=True, hide_index=True)
 
