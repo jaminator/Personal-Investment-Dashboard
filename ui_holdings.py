@@ -149,7 +149,7 @@ def render_holdings(config: PortfolioConfig) -> None:
         })
 
     df = pd.DataFrame(rows)
-    st.dataframe(df.drop(columns=["ID"]), use_container_width=True, hide_index=True)
+    st.dataframe(df.drop(columns=["ID"]), width="stretch", hide_index=True)
 
     # --- Per-holding dividend settings --------------------------------------
     st.subheader("Dividend Settings")
@@ -237,7 +237,7 @@ def render_holdings(config: PortfolioConfig) -> None:
                 hole=0.4,
             )
             fig.update_traces(textposition="inside", textinfo="percent+label")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
     with col2:
         # By holding
@@ -250,7 +250,7 @@ def render_holdings(config: PortfolioConfig) -> None:
                 hole=0.4,
             )
             fig.update_traces(textposition="inside", textinfo="percent+label")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
     # --- Summary ------------------------------------------------------------
     st.metric("Total Portfolio Value", _fmt(total_val))

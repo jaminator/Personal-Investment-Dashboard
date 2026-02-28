@@ -134,7 +134,7 @@ def render_analytics(config: PortfolioConfig) -> None:
                 title="Holdings Correlation Matrix",
                 text_auto=".2f",
             )
-            st.plotly_chart(fig_corr, use_container_width=True)
+            st.plotly_chart(fig_corr, width="stretch")
 
     # ======================================================================
     # Rolling metrics
@@ -158,7 +158,7 @@ def render_analytics(config: PortfolioConfig) -> None:
                 yaxis_title="Sharpe Ratio",
                 hovermode="x unified",
             )
-            st.plotly_chart(fig_rs, use_container_width=True)
+            st.plotly_chart(fig_rs, width="stretch")
 
     with col2:
         r_vol = rolling_volatility(returns, window=252)
@@ -176,7 +176,7 @@ def render_analytics(config: PortfolioConfig) -> None:
                 yaxis_tickformat=".1%",
                 hovermode="x unified",
             )
-            st.plotly_chart(fig_rv, use_container_width=True)
+            st.plotly_chart(fig_rv, width="stretch")
 
     # ======================================================================
     # Sleeve-level analytics
@@ -198,7 +198,7 @@ def render_analytics(config: PortfolioConfig) -> None:
                 "Sharpe": f"{sharpe_ratio(s_ret, rf):.3f}",
             })
         if sleeve_rows:
-            st.dataframe(pd.DataFrame(sleeve_rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(sleeve_rows), width="stretch", hide_index=True)
 
 
 def _display_metric_cards(metrics: dict) -> None:

@@ -118,7 +118,7 @@ def render_data_quality(config: PortfolioConfig) -> None:
                 })
 
             df = pd.DataFrame(rows)
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(df, width="stretch", hide_index=True)
 
             # Show current verified yield
             vy = compute_annualized_yield(t)
@@ -136,10 +136,10 @@ def render_data_quality(config: PortfolioConfig) -> None:
             if diag_df.empty:
                 st.info("No dividend data available for diagnostic report.")
             else:
-                st.dataframe(diag_df, use_container_width=True, hide_index=True)
+                st.dataframe(diag_df, width="stretch", hide_index=True)
                 st.session_state["diag_report"] = diag_df
 
         # Show cached report if available
         cached_report = st.session_state.get("diag_report")
         if cached_report is not None and not cached_report.empty:
-            st.dataframe(cached_report, use_container_width=True, hide_index=True)
+            st.dataframe(cached_report, width="stretch", hide_index=True)

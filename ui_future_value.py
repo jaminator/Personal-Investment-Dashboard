@@ -102,14 +102,14 @@ def render_future_value(config: PortfolioConfig) -> None:
         yaxis_tickformat="$,.0f",
         showlegend=False,
     )
-    st.plotly_chart(fig_wf, use_container_width=True)
+    st.plotly_chart(fig_wf, width="stretch")
 
     # Waterfall summary table
     wf_table = pd.DataFrame([
         {"Component": k, "Amount": _fmt(v)}
         for k, v in waterfall_data.items()
     ])
-    st.dataframe(wf_table, use_container_width=True, hide_index=True)
+    st.dataframe(wf_table, width="stretch", hide_index=True)
 
     # ======================================================================
     # Portfolio Value Over Time Chart
@@ -220,7 +220,7 @@ def render_future_value(config: PortfolioConfig) -> None:
         hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
     )
-    st.plotly_chart(fig_proj, use_container_width=True)
+    st.plotly_chart(fig_proj, width="stretch")
 
     # ======================================================================
     # Terminal value distribution
@@ -254,7 +254,7 @@ def render_future_value(config: PortfolioConfig) -> None:
         xaxis_tickformat="$,.0f",
         yaxis_title="Frequency",
     )
-    st.plotly_chart(fig_hist, use_container_width=True)
+    st.plotly_chart(fig_hist, width="stretch")
 
     # ======================================================================
     # Percentile table
@@ -266,7 +266,7 @@ def render_future_value(config: PortfolioConfig) -> None:
         "Percentile": [f"{p}th" for p in percentiles],
         "Ending Value": [_fmt(v) for v in pct_vals],
     })
-    st.dataframe(pct_table, use_container_width=True, hide_index=True)
+    st.dataframe(pct_table, width="stretch", hide_index=True)
 
     # ======================================================================
     # Allocation over time (simplified)
@@ -312,4 +312,4 @@ def _render_allocation_drift(config: PortfolioConfig, sim_result: dict) -> None:
         yaxis_tickformat="$,.0f",
         hovermode="x unified",
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
