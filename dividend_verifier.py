@@ -125,27 +125,45 @@ def _fetch_yfinance_dividends(
 # ---------------------------------------------------------------------------
 
 def _get_fmp_api_key() -> Optional[str]:
-    """Read FMP API key from Streamlit secrets or session state."""
+    """Read FMP API key exclusively from Streamlit secrets.
+
+    Expected secrets.toml layout::
+
+        [api_keys]
+        FMP_API_KEY = "your-key-here"
+    """
     try:
-        key = st.secrets.get("FMP_API_KEY", "")
+        key = st.secrets["api_keys"]["FMP_API_KEY"]
         if key:
             return str(key)
-    except Exception:
+    except (KeyError, FileNotFoundError, Exception):
         pass
+    return None
+
+
+def _fmp_rate_check() -> bool:
+    """Return True if an FMP request is allowed under the daily limit."""
     try:
-        return st.session_state.get("fmp_api_key", "") or None
-    except Exception:
-        return None
+        from data_fetcher import _fmp_rate_check as _df_rate_check
+        return _df_rate_check()
+    except ImportError:
+        return True
 
 
 def _fetch_fmp_dividends(ticker: str) -> list[dict]:
     """Fetch dividend data from FMP. Returns list of dicts with
     ex_dividend_date, payment_date, record_date, declaration_date,
-    dividend_per_share."""
+    dividend_per_share.
+
+    Uses the **adjDividend** field (split-adjusted) for consistency
+    with yfinance's split-adjusted dividend history.
+    """
     if _requests is None:
         return []
     api_key = _get_fmp_api_key()
     if not api_key:
+        return []
+    if not _fmp_rate_check():
         return []
 
     url = f"{_FMP_BASE}/historical-price-full/stock_dividend/{ticker}"
@@ -154,6 +172,12 @@ def _fetch_fmp_dividends(ticker: str) -> list[dict]:
         if resp.status_code != 200:
             return []
         data = resp.json()
+        # Handle FMP error responses
+        if isinstance(data, dict) and "Error Message" in data:
+            logger.warning("FMP error for %s: %s", ticker, data["Error Message"])
+            return []
+        if isinstance(data, list) and len(data) == 0:
+            return []
         if not data or "historical" not in data:
             return []
     except Exception as e:
@@ -165,12 +189,16 @@ def _fetch_fmp_dividends(ticker: str) -> list[dict]:
         ex_date = _parse_date(entry.get("date"))
         if ex_date is None:
             continue
+        # Use adjDividend (split-adjusted) for consistency with yfinance
+        adj_div = entry.get("adjDividend")
+        if adj_div is None:
+            adj_div = entry.get("dividend", 0)
         results.append({
             "ex_dividend_date": ex_date,
             "declaration_date": _parse_date(entry.get("declarationDate")),
             "record_date": _parse_date(entry.get("recordDate")),
             "payment_date": _parse_date(entry.get("paymentDate")),
-            "dividend_per_share": float(entry.get("dividend", 0) or 0),
+            "dividend_per_share": float(adj_div or 0),
         })
     return sorted(results, key=lambda x: x["ex_dividend_date"])
 
