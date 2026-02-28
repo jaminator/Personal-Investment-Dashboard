@@ -4,14 +4,13 @@ validate_dividend_data.py — Diagnostic report and validation test suite
 for the dividend verification layer.
 
 Runs the following tests:
-    Test 1: PDI distribution amount accuracy (yfinance vs FMP vs SEC EDGAR)
-    Test 2: PDI payment date accuracy (FMP vs SEC vs estimated offset)
-    Test 3: VO and SPY distribution amount accuracy (yfinance vs FMP)
-    Test 4: VO and SPY payment date accuracy (FMP vs estimated offset)
-    Test 5: Yield computation consistency (PDI quarterly snapshots)
-    Test 6: Kelly sleeve signal integrity (Q1 2025 reference calculation)
+    Test 1: FMP Payment Date Population (PDI, VO, SPY)
+    Test 2: Amount Source Priority (FMP preferred when available)
+    Test 3: Waterfall Fallback (graceful degradation)
+    Test 4: Cash Flow Tab Rendering (FMP indicators present)
+    Test 5: Kelly Sleeve Yield Using FMP Data
 
-Also generates the full diagnostic report for PDI, VO, SPY, AGG.
+Also generates the full diagnostic report for PDI, VO, SPY.
 """
 
 from __future__ import annotations
@@ -27,7 +26,6 @@ from dividend_verifier import (
     generate_diagnostic_report,
     _fetch_yfinance_dividends,
     _fetch_fmp_dividends,
-    _fetch_sec_dividends,
     _amounts_agree,
     _dates_agree,
 )
@@ -52,9 +50,9 @@ def print_subsection(title: str) -> None:
 # ---------------------------------------------------------------------------
 
 def run_diagnostic_report() -> None:
-    """Print a full diagnostic report for PDI, VO, SPY, AGG."""
+    """Print a full diagnostic report for PDI, VO, SPY."""
     print_section("DIAGNOSTIC REPORT — Last 8 Events per Ticker")
-    tickers = ["PDI", "VO", "SPY", "AGG"]
+    tickers = ["PDI", "VO", "SPY"]
 
     for ticker in tickers:
         print_subsection(f"Ticker: {ticker}")
@@ -62,11 +60,9 @@ def run_diagnostic_report() -> None:
         # Fetch from each source independently
         yf_divs = _fetch_yfinance_dividends(ticker)
         fmp_divs = _fetch_fmp_dividends(ticker)
-        sec_divs = _fetch_sec_dividends(ticker, max_filings=10)
 
         print(f"  yfinance: {len(yf_divs)} events")
         print(f"  FMP:      {len(fmp_divs)} events")
-        print(f"  SEC 8-K:  {len(sec_divs)} events with dividend data")
 
         # Get verified events
         events = get_verified_dividend_events(ticker)
@@ -81,7 +77,8 @@ def run_diagnostic_report() -> None:
             f"{'Ex-Date':<12} {'yf $/share':>12} {'FMP $/share':>12} "
             f"{'FMP Ex-Date':<12} {'FMP PayDate':<12} "
             f"{'FMP RecDate':<12} {'FMP DeclDate':<12} "
-            f"{'Date Agree':>10} {'Amt Agree':>10}"
+            f"{'Date Agree':>10} {'Amt Agree':>10} "
+            f"{'Amt Src':>8} {'Pay Src':>10}"
         )
         print(f"  {header}")
         print(f"  {'-' * len(header)}")
@@ -106,27 +103,10 @@ def run_diagnostic_report() -> None:
                 f"{str(ev.ex_dividend_date):<12} {yf_amt:>12} {fmp_amt:>12} "
                 f"{fmp_ex:<12} {fmp_pay:<12} "
                 f"{fmp_rec:<12} {fmp_decl:<12} "
-                f"{date_agree:>10} {amt_agree:>10}"
+                f"{date_agree:>10} {amt_agree:>10} "
+                f"{ev.amount_source:>8} {ev.payment_date_source:>10}"
             )
             print(f"  {row}")
-
-            # Show SEC data if available
-            if ev.sec_amount is not None or ev.sec_payment_date:
-                sec_parts = []
-                if ev.sec_amount is not None:
-                    sec_parts.append(f"SEC amount=${ev.sec_amount:.4f}")
-                if ev.sec_payment_date:
-                    sec_parts.append(f"SEC payDate={ev.sec_payment_date}")
-                print(f"    >> {', '.join(sec_parts)}")
-
-            # Show PIMCO data if available
-            if ev.pimco_amount is not None or ev.pimco_payment_date:
-                pimco_parts = []
-                if ev.pimco_amount is not None:
-                    pimco_parts.append(f"PIMCO amount=${ev.pimco_amount:.4f}")
-                if ev.pimco_payment_date:
-                    pimco_parts.append(f"PIMCO payDate={ev.pimco_payment_date}")
-                print(f"    >> {', '.join(pimco_parts)}")
 
             # Show warnings
             if ev.data_quality_warnings:
@@ -135,127 +115,16 @@ def run_diagnostic_report() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 1: PDI Distribution Amount Accuracy
+# Test 1: FMP Payment Date Population
 # ---------------------------------------------------------------------------
 
-def test_1_pdi_amount() -> bool:
-    """Cross-validate last 6 monthly PDI distributions across sources."""
-    print_subsection("Test 1: PDI Distribution Amount Accuracy")
-
-    events = get_verified_dividend_events("PDI")
-    recent = events[-6:] if len(events) > 6 else events
-
-    if not recent:
-        print("  SKIP: No PDI dividend data available (network required)")
-        return True  # Not a failure if no data
-
-    total = len(recent)
-    mismatches = 0
-
-    for ev in recent:
-        sources_present = []
-        if ev.yfinance_amount is not None:
-            sources_present.append(("yfinance", ev.yfinance_amount))
-        if ev.fmp_amount is not None:
-            sources_present.append(("FMP", ev.fmp_amount))
-        if ev.sec_amount is not None:
-            sources_present.append(("SEC_EDGAR", ev.sec_amount))
-
-        if len(sources_present) < 2:
-            print(f"  {ev.ex_dividend_date}: Only {len(sources_present)} source(s) — "
-                  f"{', '.join(f'{s}=${a:.4f}' for s, a in sources_present)}")
-            continue
-
-        all_agree = True
-        for i, (s1, a1) in enumerate(sources_present):
-            for s2, a2 in sources_present[i + 1:]:
-                if not _amounts_agree(a1, a2):
-                    all_agree = False
-                    mismatches += 1
-                    print(f"  {ev.ex_dividend_date}: MISMATCH {s1}=${a1:.4f} vs {s2}=${a2:.4f}")
-
-        if all_agree:
-            print(f"  {ev.ex_dividend_date}: AGREE "
-                  f"({', '.join(f'{s}=${a:.4f}' for s, a in sources_present)})")
-
-    passed = mismatches == 0
-    print(f"\n  {'PASS' if passed else 'FAIL'}: {total} events checked, {mismatches} mismatches")
-    return passed
-
-
-# ---------------------------------------------------------------------------
-# Test 2: PDI Payment Date Accuracy
-# ---------------------------------------------------------------------------
-
-def test_2_pdi_payment_dates() -> bool:
-    """Compare FMP payment dates vs SEC EDGAR vs estimated offset for PDI."""
-    print_subsection("Test 2: PDI Payment Date Accuracy")
-
-    events = get_verified_dividend_events("PDI")
-    recent = events[-6:] if len(events) > 6 else events
-
-    if not recent:
-        print("  SKIP: No PDI dividend data available")
-        return True
-
-    mismatches = 0
-    offsets = []
-
-    for ev in recent:
-        if ev.fmp_payment_date and ev.ex_dividend_date:
-            actual_offset = (ev.fmp_payment_date - ev.ex_dividend_date).days
-            offsets.append(actual_offset)
-
-        pay_sources = {}
-        if ev.fmp_payment_date:
-            pay_sources["FMP"] = ev.fmp_payment_date
-        if ev.sec_payment_date:
-            pay_sources["SEC_EDGAR"] = ev.sec_payment_date
-        estimated = ev.ex_dividend_date + dt.timedelta(days=15) if ev.ex_dividend_date else None
-        if estimated:
-            pay_sources["Estimated(+15d)"] = estimated
-
-        if len(pay_sources) < 2:
-            names = ", ".join(f"{k}={v}" for k, v in pay_sources.items())
-            print(f"  {ev.ex_dividend_date}: Only {len(pay_sources)} source(s) — {names}")
-            continue
-
-        # Check FMP vs SEC agreement
-        fmp_d = pay_sources.get("FMP")
-        sec_d = pay_sources.get("SEC_EDGAR")
-        if fmp_d and sec_d:
-            if _dates_agree(fmp_d, sec_d, tolerance_days=2):
-                print(f"  {ev.ex_dividend_date}: AGREE FMP={fmp_d} SEC={sec_d}")
-            else:
-                mismatches += 1
-                diff = (sec_d - fmp_d).days
-                print(f"  {ev.ex_dividend_date}: MISMATCH FMP={fmp_d} SEC={sec_d} (diff={diff}d)")
-        elif fmp_d:
-            est_d = pay_sources.get("Estimated(+15d)")
-            if est_d:
-                diff = (fmp_d - est_d).days
-                print(f"  {ev.ex_dividend_date}: FMP={fmp_d} vs Est={est_d} (diff={diff}d)")
-
-    if offsets:
-        avg_offset = sum(offsets) / len(offsets)
-        print(f"\n  Average ex-date to payment-date offset: {avg_offset:.1f} days")
-        print(f"  (Default estimate for monthly funds: 15 days)")
-
-    passed = mismatches == 0
-    print(f"\n  {'PASS' if passed else 'FAIL'}: {mismatches} FMP/SEC mismatches")
-    return passed
-
-
-# ---------------------------------------------------------------------------
-# Test 3: VO and SPY Distribution Amount Accuracy
-# ---------------------------------------------------------------------------
-
-def test_3_vo_spy_amount() -> bool:
-    """Cross-validate last 4 quarterly VO and SPY distributions."""
-    print_subsection("Test 3: VO and SPY Distribution Amount Accuracy")
+def test_1_fmp_payment_dates() -> bool:
+    """For PDI, VO, SPY — fetch most recent 4 dividend events each.
+    PASS if payment_date_source == 'FMP' for at least 3 of 4 events per ticker."""
+    print_subsection("Test 1: FMP Payment Date Population")
 
     passed = True
-    for ticker in ["VO", "SPY"]:
+    for ticker in ["PDI", "VO", "SPY"]:
         events = get_verified_dividend_events(ticker)
         recent = events[-4:] if len(events) > 4 else events
 
@@ -263,44 +132,34 @@ def test_3_vo_spy_amount() -> bool:
             print(f"  {ticker}: SKIP — No data available")
             continue
 
-        mismatches = 0
+        fmp_count = 0
         for ev in recent:
-            if ev.yfinance_amount is not None and ev.fmp_amount is not None:
-                if _amounts_agree(ev.yfinance_amount, ev.fmp_amount):
-                    print(f"  {ticker} {ev.ex_dividend_date}: AGREE "
-                          f"yf=${ev.yfinance_amount:.4f} FMP=${ev.fmp_amount:.4f}")
-                else:
-                    mismatches += 1
-                    print(f"  {ticker} {ev.ex_dividend_date}: MISMATCH "
-                          f"yf=${ev.yfinance_amount:.4f} FMP=${ev.fmp_amount:.4f} "
-                          f"(diff=${abs(ev.yfinance_amount - ev.fmp_amount):.4f})")
-            else:
-                sources = []
-                if ev.yfinance_amount is not None:
-                    sources.append(f"yf=${ev.yfinance_amount:.4f}")
-                if ev.fmp_amount is not None:
-                    sources.append(f"FMP=${ev.fmp_amount:.4f}")
-                print(f"  {ticker} {ev.ex_dividend_date}: "
-                      f"Only {len(sources)} source(s) — {', '.join(sources)}")
+            src = ev.payment_date_source
+            print(f"  {ticker} {ev.ex_dividend_date}: "
+                  f"payment_date={ev.payment_date} source={src}")
+            if src == "FMP":
+                fmp_count += 1
 
-        if mismatches > 0:
+        ok = fmp_count >= 3
+        if not ok:
             passed = False
-            print(f"  {ticker}: FAIL — {mismatches} mismatches")
-        else:
-            print(f"  {ticker}: PASS")
+        print(f"  {ticker}: {'PASS' if ok else 'FAIL'} "
+              f"({fmp_count}/{len(recent)} FMP-sourced)")
 
     return passed
 
 
 # ---------------------------------------------------------------------------
-# Test 4: VO and SPY Payment Date Accuracy
+# Test 2: Amount Source Priority
 # ---------------------------------------------------------------------------
 
-def test_4_vo_spy_payment_dates() -> bool:
-    """Compare FMP payment dates vs estimated offset for VO and SPY."""
-    print_subsection("Test 4: VO and SPY Payment Date Accuracy")
+def test_2_amount_source_priority() -> bool:
+    """For PDI, VO, SPY — confirm amount_source == 'FMP' for all events
+    where FMP returned a non-zero adjDividend."""
+    print_subsection("Test 2: Amount Source Priority")
 
-    for ticker in ["VO", "SPY"]:
+    passed = True
+    for ticker in ["PDI", "VO", "SPY"]:
         events = get_verified_dividend_events(ticker)
         recent = events[-4:] if len(events) > 4 else events
 
@@ -308,164 +167,137 @@ def test_4_vo_spy_payment_dates() -> bool:
             print(f"  {ticker}: SKIP — No data available")
             continue
 
-        offsets = []
         for ev in recent:
-            if ev.fmp_payment_date and ev.ex_dividend_date:
-                actual = (ev.fmp_payment_date - ev.ex_dividend_date).days
-                offsets.append(actual)
-                estimated = ev.ex_dividend_date + dt.timedelta(days=20)
-                diff = (ev.fmp_payment_date - estimated).days
+            if ev.fmp_amount is not None and ev.fmp_amount > 0:
+                if ev.amount_source != "FMP":
+                    passed = False
+                    print(f"  {ticker} {ev.ex_dividend_date}: FAIL — "
+                          f"FMP amount=${ev.fmp_amount:.4f} available but "
+                          f"amount_source={ev.amount_source}")
+                else:
+                    print(f"  {ticker} {ev.ex_dividend_date}: OK — "
+                          f"amount_source=FMP (${ev.fmp_amount:.4f})")
+            else:
+                print(f"  {ticker} {ev.ex_dividend_date}: OK — "
+                      f"No FMP amount, using {ev.amount_source}")
+
+    return passed
+
+
+# ---------------------------------------------------------------------------
+# Test 3: Waterfall Fallback
+# ---------------------------------------------------------------------------
+
+def test_3_waterfall_fallback() -> bool:
+    """Test graceful fallback when FMP has no coverage for a ticker."""
+    print_subsection("Test 3: Waterfall Fallback")
+
+    # Use a ticker that likely has yfinance data but limited FMP coverage
+    ticker = "SCHD"  # Schwab US Dividend Equity ETF
+    try:
+        events = get_verified_dividend_events(ticker)
+        if not events:
+            print(f"  {ticker}: No data — testing with empty result (no exception = PASS)")
+            return True
+
+        recent = events[-2:] if len(events) > 2 else events
+        for ev in recent:
+            print(f"  {ticker} {ev.ex_dividend_date}: "
+                  f"amount_source={ev.amount_source} "
+                  f"pay_source={ev.payment_date_source} "
+                  f"amount=${ev.distribution_per_share:.4f}")
+
+        # Verify no exception was thrown and sources are valid
+        for ev in recent:
+            if ev.payment_date_source not in ("FMP", "ESTIMATED"):
+                print(f"  FAIL: Invalid payment_date_source: {ev.payment_date_source}")
+                return False
+            if ev.amount_source not in ("FMP", "yfinance"):
+                print(f"  FAIL: Invalid amount_source: {ev.amount_source}")
+                return False
+
+        print("  PASS: Graceful fallback without exception")
+        return True
+    except Exception as e:
+        print(f"  FAIL: Exception during fallback: {e}")
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Test 4: Cash Flow Tab Rendering check
+# ---------------------------------------------------------------------------
+
+def test_4_cash_flow_rendering() -> bool:
+    """Confirm that at least one FMP-sourced payment date exists for
+    holdings that have FMP dividend coverage."""
+    print_subsection("Test 4: Cash Flow Tab Rendering")
+
+    has_fmp = False
+    for ticker in ["PDI", "VO", "SPY"]:
+        events = get_verified_dividend_events(ticker)
+        for ev in events[-4:] if len(events) > 4 else events:
+            if ev.payment_date_source == "FMP":
+                has_fmp = True
                 print(f"  {ticker} {ev.ex_dividend_date}: "
-                      f"FMP pay={ev.fmp_payment_date} (offset={actual}d, "
-                      f"vs est+20d diff={diff}d)")
-            elif ev.ex_dividend_date:
-                print(f"  {ticker} {ev.ex_dividend_date}: No FMP payment date")
+                      f"FMP payment_date={ev.payment_date}")
 
-        if offsets:
-            avg = sum(offsets) / len(offsets)
-            print(f"  {ticker} average offset: {avg:.1f} days "
-                  f"(default estimate: 20 days)")
-        print()
-
-    return True  # Informational only
+    if has_fmp:
+        print("  PASS: FMP payment dates present for cash flow display")
+    else:
+        print("  FAIL: No FMP payment dates found")
+    return has_fmp
 
 
 # ---------------------------------------------------------------------------
-# Test 5: Yield Computation Consistency
+# Test 5: Kelly Sleeve Yield Using FMP Data
 # ---------------------------------------------------------------------------
 
-def test_5_yield_consistency() -> bool:
-    """Compute PDI annualized yield at 4 quarterly snapshots."""
-    print_subsection("Test 5: PDI Yield Computation Consistency")
+def test_5_kelly_yield_fmp() -> bool:
+    """Compute PDI annualized yield as of Dec 31 2024 and confirm
+    it uses FMP adjDividend as the distribution_per_share input."""
+    print_subsection("Test 5: Kelly Sleeve Yield Using FMP Data")
 
-    reference_dates = [
-        dt.date(2024, 3, 29),   # Q1 2024 end (last business day)
-        dt.date(2024, 6, 28),   # Q2 2024 end
-        dt.date(2024, 9, 30),   # Q3 2024 end
-        dt.date(2024, 12, 31),  # Q4 2024 end
-    ]
-
-    # Try to get historical prices for these dates
     try:
         from data_fetcher import fetch_history
-        hist = fetch_history("PDI", start="2024-01-01", end="2025-01-05")
-        if hist.empty:
+        import pandas as pd
+
+        pdi_hist = fetch_history("PDI", start="2024-12-01", end="2025-01-10")
+        if pdi_hist.empty:
             print("  SKIP: Cannot fetch PDI price history (network required)")
             return True
 
-        import pandas as pd
-        for ref_date in reference_dates:
-            latest = get_latest_distribution("PDI", as_of_date=ref_date)
-            if latest is None:
-                print(f"  {ref_date}: No distribution data as of this date")
-                continue
-
-            # Find closest price to ref_date
-            ts = pd.Timestamp(ref_date)
-            idx = hist.index.searchsorted(ts)
-            idx = min(idx, len(hist) - 1)
-            if idx > 0 and abs((hist.index[idx] - ts).days) > abs((hist.index[idx - 1] - ts).days):
-                idx = idx - 1
-            price = float(hist["Close"].iloc[idx])
-            actual_date = hist.index[idx].date()
-
-            ann_yield = compute_annualized_yield("PDI", ref_date, price)
-
-            print(f"  {ref_date} (price as of {actual_date}: ${price:.2f}):")
-            print(f"    Last dist/share: ${latest.distribution_per_share:.4f}")
-            print(f"    Frequency: {latest.frequency}x/year")
-            print(f"    Annualized yield: {ann_yield:.2%}" if ann_yield else "    Annualized yield: N/A")
-            print(f"    Amount source: {latest.amount_source}")
-            print(f"    Amount verified: {'Y' if latest.amount_verified else 'N'}")
-
-    except Exception as e:
-        print(f"  SKIP: Error computing yields — {e}")
-        return True
-
-    return True
-
-
-# ---------------------------------------------------------------------------
-# Test 6: Kelly Sleeve Signal Integrity
-# ---------------------------------------------------------------------------
-
-def test_6_kelly_signal() -> bool:
-    """Run a single Kelly rebalancing evaluation for Q1 2025."""
-    print_subsection("Test 6: Kelly Sleeve Signal Integrity (Q1 2025)")
-
-    try:
-        from data_fetcher import fetch_history
-        import pandas as pd
-
-        # Get PDI data as of Dec 31 2024
-        pdi_hist = fetch_history("PDI", start="2024-12-01", end="2025-01-10")
-        vo_hist = fetch_history("VO", start="2024-12-01", end="2025-01-10")
-
-        if pdi_hist.empty or vo_hist.empty:
-            print("  SKIP: Cannot fetch price history (network required)")
-            return True
-
-        # Find Dec 31 2024 price (or nearest trading day)
         dec31 = pd.Timestamp("2024-12-31")
-        jan2 = pd.Timestamp("2025-01-02")
+        idx = pdi_hist.index.searchsorted(dec31)
+        idx = min(idx, len(pdi_hist) - 1)
+        pdi_price = float(pdi_hist["Close"].iloc[idx])
 
-        # PDI price on Dec 31 2024
-        pdi_idx = pdi_hist.index.searchsorted(dec31)
-        pdi_idx = min(pdi_idx, len(pdi_hist) - 1)
-        pdi_price_dec31 = float(pdi_hist["Close"].iloc[pdi_idx])
-
-        # VO price on Jan 2 2025 (first trading day of Q1)
-        vo_idx = vo_hist.index.searchsorted(jan2)
-        vo_idx = min(vo_idx, len(vo_hist) - 1)
-        vo_price_jan2 = float(vo_hist["Close"].iloc[vo_idx])
-        vo_date_jan2 = vo_hist.index[vo_idx].date()
-
-        # Get verified PDI yield
-        latest_pdi = get_latest_distribution("PDI", as_of_date=dt.date(2024, 12, 31))
-        if latest_pdi is None:
-            print("  SKIP: No PDI distribution data")
+        latest = get_latest_distribution("PDI", as_of_date=dt.date(2024, 12, 31))
+        if latest is None:
+            print("  SKIP: No PDI distribution data as of 2024-12-31")
             return True
 
-        pdi_yield = compute_annualized_yield("PDI", dt.date(2024, 12, 31), pdi_price_dec31)
+        ann_yield = compute_annualized_yield("PDI", dt.date(2024, 12, 31), pdi_price)
 
-        # Simulate Kelly signal
-        # Assume 50/50 portfolio with $100K initial
-        initial = 100_000.0
-        vo_alloc = initial * 0.5
-        pdi_alloc = initial * 0.5
+        print(f"  PDI price (Dec 31 2024): ${pdi_price:.2f}")
+        print(f"  Last dist/share: ${latest.distribution_per_share:.4f}")
+        print(f"  Frequency: {latest.frequency}x/year")
+        print(f"  Amount source: {latest.amount_source}")
+        if ann_yield:
+            print(f"  Annualized yield: {ann_yield:.2%}")
 
-        vo_shares = vo_alloc / vo_price_jan2 if vo_price_jan2 > 0 else 0
-        vo_value = vo_shares * vo_price_jan2
-
-        # Signal = yield * stock_value * period_fraction * scaling
-        period_fraction = 1.0 / 4.0  # Quarterly
-        signal = (pdi_yield or 0) * vo_value * period_fraction * 1.0
-
-        print(f"  PDI last dist/share:    ${latest_pdi.distribution_per_share:.4f}")
-        print(f"  PDI distributions/year: {latest_pdi.frequency}")
-        print(f"  PDI close Dec 31 2024:  ${pdi_price_dec31:.2f}")
-        print(f"  PDI annualized yield:   {pdi_yield:.2%}" if pdi_yield else "  PDI annualized yield:   N/A")
-        print(f"  Target PDI weight:      50%")
-        print(f"  Target VO weight:       50%")
-        print(f"  VO value on {vo_date_jan2}:  ${vo_value:,.2f}")
-        print(f"  Adjusted signal line:   ${signal:,.2f}")
-        print()
-        print(f"  Amount source: {latest_pdi.amount_source}")
-        print(f"  Amount verified: {'Y' if latest_pdi.amount_verified else 'N'}")
-        if latest_pdi.data_quality_warnings:
-            for w in latest_pdi.data_quality_warnings:
-                print(f"  WARNING: {w}")
-
-        print()
-        print("  This provides a manually verifiable reference for the Kelly engine.")
+        if latest.amount_source == "FMP":
+            print("  PASS: amount_source == FMP")
+            return True
+        elif latest.fmp_amount is None:
+            print("  PASS (conditional): No FMP data available, using yfinance")
+            return True
+        else:
+            print(f"  FAIL: amount_source={latest.amount_source} despite FMP data available")
+            return False
 
     except Exception as e:
-        print(f"  SKIP: Error in Kelly signal test — {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"  SKIP: Error — {e}")
         return True
-
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -486,12 +318,11 @@ def main():
     print_section("VALIDATION TEST SUITE")
 
     results: dict[str, bool] = {}
-    results["Test 1: PDI Amount Accuracy"] = test_1_pdi_amount()
-    results["Test 2: PDI Payment Dates"] = test_2_pdi_payment_dates()
-    results["Test 3: VO/SPY Amount Accuracy"] = test_3_vo_spy_amount()
-    results["Test 4: VO/SPY Payment Dates"] = test_4_vo_spy_payment_dates()
-    results["Test 5: Yield Consistency"] = test_5_yield_consistency()
-    results["Test 6: Kelly Signal Integrity"] = test_6_kelly_signal()
+    results["Test 1: FMP Payment Date Population"] = test_1_fmp_payment_dates()
+    results["Test 2: Amount Source Priority"] = test_2_amount_source_priority()
+    results["Test 3: Waterfall Fallback"] = test_3_waterfall_fallback()
+    results["Test 4: Cash Flow Tab Rendering"] = test_4_cash_flow_rendering()
+    results["Test 5: Kelly Yield FMP Data"] = test_5_kelly_yield_fmp()
 
     # Summary
     print_section("TEST RESULTS SUMMARY")

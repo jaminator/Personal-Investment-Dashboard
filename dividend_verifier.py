@@ -1,28 +1,23 @@
 """
 dividend_verifier.py — Cross-validated dividend data layer.
 
-Fetches dividend per-share amounts and payment dates from multiple
-sources (yfinance, FMP, SEC EDGAR, PIMCO) and cross-validates them
-before handing verified data to the rest of the application.
+Fetches dividend per-share amounts and payment dates from two sources
+(yfinance and FMP) and cross-validates them before handing verified
+data to the rest of the application.
 
 Priority waterfall for per-share amount:
-    1. SEC EDGAR 8-K filing (most authoritative)
-    2. PIMCO distribution page (PDI / PIMCO CEFs only)
-    3. FMP historical dividends API
-    4. yfinance ticker.dividends
+    1. FMP adjDividend (split-adjusted)
+    2. yfinance ticker.dividends
 
 Priority waterfall for payment date:
-    1. SEC EDGAR 8-K payable date
-    2. PIMCO distribution page payable date (PDI only)
-    3. FMP paymentDate field
-    4. Estimated offset from ex-dividend date
+    1. FMP paymentDate (if non-null and after ex_dividend_date)
+    2. Estimated offset from ex-dividend date
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import logging
-import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -36,19 +31,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# SEC EDGAR requires a descriptive User-Agent header
-_SEC_HEADERS = {
-    "User-Agent": "InvestmentDashboard/1.0 (portfolio-tool@example.com)",
-    "Accept-Encoding": "gzip, deflate",
-}
-
 _FMP_BASE = "https://financialmodelingprep.com/stable"
-
-# Known PIMCO closed-end fund tickers
-_PIMCO_CEF_TICKERS = {
-    "PDI", "PTY", "PCI", "PKO", "PHK", "PCM", "PFL", "PFN",
-    "PDO", "PAXS", "PCN", "PMF", "PGP", "RCS",
-}
 
 
 # ---------------------------------------------------------------------------
@@ -65,10 +48,9 @@ class DividendEvent:
     declaration_date: Optional[dt.date] = None
     distribution_per_share: float = 0.0
     frequency: int = 0                        # 12, 4, 2, or 1
-    payment_date_source: str = "ESTIMATED"     # FMP | SEC_EDGAR | ESTIMATED | PIMCO
-    amount_source: str = "yfinance"            # yfinance | FMP | SEC_EDGAR | PIMCO
-    amount_verified: bool = False              # True if 2+ sources agree
-    payment_date_verified: bool = False        # True if 2+ sources agree
+    payment_date_source: str = "ESTIMATED"    # "FMP" | "ESTIMATED"
+    amount_source: str = "yfinance"           # "FMP" | "yfinance"
+    amount_verified: bool = False             # True if both sources agree
     data_quality_warnings: list[str] = field(default_factory=list)
 
     # Per-source raw values (for diagnostics)
@@ -78,10 +60,6 @@ class DividendEvent:
     fmp_payment_date: Optional[dt.date] = None
     fmp_record_date: Optional[dt.date] = None
     fmp_declaration_date: Optional[dt.date] = None
-    sec_amount: Optional[float] = None
-    sec_payment_date: Optional[dt.date] = None
-    pimco_amount: Optional[float] = None
-    pimco_payment_date: Optional[dt.date] = None
 
 
 # ---------------------------------------------------------------------------
@@ -212,287 +190,6 @@ def _fetch_fmp_dividends(ticker: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Source 3: SEC EDGAR
-# ---------------------------------------------------------------------------
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def _fetch_sec_cik(ticker: str) -> Optional[str]:
-    """Look up the CIK number for a ticker from SEC EDGAR company_tickers.json."""
-    if _requests is None:
-        return None
-    try:
-        url = "https://www.sec.gov/files/company_tickers.json"
-        resp = _requests.get(url, headers=_SEC_HEADERS, timeout=15)
-        if resp.status_code != 200:
-            return None
-        data = resp.json()
-        ticker_upper = ticker.upper()
-        for entry in data.values():
-            if entry.get("ticker", "").upper() == ticker_upper:
-                cik = str(entry["cik_str"])
-                return cik.zfill(10)  # Pad to 10 digits
-        return None
-    except Exception as e:
-        logger.warning("SEC CIK lookup failed for %s: %s", ticker, e)
-        return None
-
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def _fetch_sec_filings(cik: str, form_type: str = "8-K", count: int = 20) -> list[dict]:
-    """Fetch recent filings from SEC EDGAR submissions endpoint.
-
-    Returns list of dicts with: accessionNumber, filingDate, primaryDocument, form.
-    """
-    if _requests is None or not cik:
-        return []
-    try:
-        url = f"https://data.sec.gov/submissions/CIK{cik}.json"
-        resp = _requests.get(url, headers=_SEC_HEADERS, timeout=15)
-        if resp.status_code != 200:
-            return []
-        data = resp.json()
-        recent = data.get("filings", {}).get("recent", {})
-        if not recent:
-            return []
-
-        forms = recent.get("form", [])
-        dates = recent.get("filingDate", [])
-        accessions = recent.get("accessionNumber", [])
-        primary_docs = recent.get("primaryDocument", [])
-
-        results = []
-        for i, form in enumerate(forms):
-            if form == form_type:
-                results.append({
-                    "accessionNumber": accessions[i] if i < len(accessions) else "",
-                    "filingDate": dates[i] if i < len(dates) else "",
-                    "primaryDocument": primary_docs[i] if i < len(primary_docs) else "",
-                    "form": form,
-                })
-                if len(results) >= count:
-                    break
-        return results
-    except Exception as e:
-        logger.warning("SEC filings fetch failed for CIK %s: %s", cik, e)
-        return []
-
-
-def _fetch_sec_8k_dividend_info(cik: str, filing: dict) -> Optional[dict]:
-    """Fetch and parse an 8-K filing to extract dividend declaration info.
-
-    Returns dict with distribution_per_share and payment_date if found.
-    """
-    if _requests is None:
-        return None
-
-    accession = filing.get("accessionNumber", "").replace("-", "")
-    primary_doc = filing.get("primaryDocument", "")
-    if not accession or not primary_doc:
-        return None
-
-    accession_dashed = filing.get("accessionNumber", "")
-    url = f"https://www.sec.gov/Archives/edgar/data/{cik.lstrip('0')}/{accession}/{primary_doc}"
-
-    try:
-        resp = _requests.get(url, headers=_SEC_HEADERS, timeout=15)
-        if resp.status_code != 200:
-            return None
-        text = resp.text
-
-        # Look for dividend/distribution per share patterns in the filing
-        result = {}
-
-        # Pattern: "$X.XXXX per share" or "distribution of $X.XXXX"
-        amount_patterns = [
-            r'\$(\d+\.\d{2,6})\s*per\s+(?:common\s+)?share',
-            r'distribution\s+(?:of\s+)?\$(\d+\.\d{2,6})',
-            r'dividend\s+(?:of\s+)?\$(\d+\.\d{2,6})\s*per',
-            r'per\s+share\s+(?:distribution|dividend)\s+(?:of\s+)?\$(\d+\.\d{2,6})',
-            r'(\d+\.\d{2,6})\s*per\s+share',
-        ]
-        for pattern in amount_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                try:
-                    amount = float(match.group(1))
-                    if 0.001 < amount < 100.0:  # Sanity check
-                        result["distribution_per_share"] = amount
-                        break
-                except (ValueError, IndexError):
-                    continue
-
-        # Pattern: "payable on/date Month DD, YYYY" or "payment date of Month DD, YYYY"
-        date_patterns = [
-            r'payable\s+(?:on\s+)?(\w+\s+\d{1,2},?\s+\d{4})',
-            r'payment\s+date\s+(?:of\s+)?(\w+\s+\d{1,2},?\s+\d{4})',
-            r'pay(?:able)?\s+date[:\s]+(\w+\s+\d{1,2},?\s+\d{4})',
-            r'payable\s+(\d{1,2}/\d{1,2}/\d{4})',
-            r'payment\s+date[:\s]+(\d{4}-\d{2}-\d{2})',
-        ]
-        for pattern in date_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                try:
-                    date_str = match.group(1)
-                    for fmt in ["%B %d, %Y", "%B %d %Y", "%m/%d/%Y", "%Y-%m-%d"]:
-                        try:
-                            parsed = dt.datetime.strptime(date_str.replace(",", "").strip(), fmt)
-                            result["payment_date"] = parsed.date()
-                            break
-                        except ValueError:
-                            continue
-                    if "payment_date" in result:
-                        break
-                except (ValueError, IndexError):
-                    continue
-
-        # Pattern: ex-dividend date
-        ex_patterns = [
-            r'ex-?dividend\s+date\s+(?:of\s+)?(\w+\s+\d{1,2},?\s+\d{4})',
-            r'ex-?date[:\s]+(\w+\s+\d{1,2},?\s+\d{4})',
-            r'ex-?dividend[:\s]+(\d{4}-\d{2}-\d{2})',
-        ]
-        for pattern in ex_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                try:
-                    date_str = match.group(1)
-                    for fmt in ["%B %d, %Y", "%B %d %Y", "%m/%d/%Y", "%Y-%m-%d"]:
-                        try:
-                            parsed = dt.datetime.strptime(date_str.replace(",", "").strip(), fmt)
-                            result["ex_dividend_date"] = parsed.date()
-                            break
-                        except ValueError:
-                            continue
-                    if "ex_dividend_date" in result:
-                        break
-                except (ValueError, IndexError):
-                    continue
-
-        if result:
-            result["filing_date"] = filing.get("filingDate", "")
-            return result
-        return None
-
-    except Exception as e:
-        logger.warning("SEC 8-K parse failed: %s", e)
-        return None
-
-
-def _fetch_sec_dividends(ticker: str, max_filings: int = 10) -> list[dict]:
-    """Fetch dividend info from SEC EDGAR 8-K filings.
-
-    Returns list of dicts with distribution_per_share, payment_date,
-    ex_dividend_date (when available), filing_date.
-    """
-    cik = _fetch_sec_cik(ticker)
-    if not cik:
-        return []
-
-    filings = _fetch_sec_filings(cik, form_type="8-K", count=max_filings)
-    if not filings:
-        return []
-
-    results = []
-    for filing in filings:
-        info = _fetch_sec_8k_dividend_info(cik, filing)
-        if info and ("distribution_per_share" in info or "payment_date" in info):
-            results.append(info)
-        if len(results) >= 6:
-            break
-
-    return results
-
-
-# ---------------------------------------------------------------------------
-# Source 4: PIMCO distribution page
-# ---------------------------------------------------------------------------
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def _fetch_pimco_distributions(ticker: str) -> list[dict]:
-    """Fetch distribution info from PIMCO's website for CEF tickers.
-
-    Returns list of dicts with ex_dividend_date, payment_date,
-    distribution_per_share.
-    """
-    if _requests is None or ticker.upper() not in _PIMCO_CEF_TICKERS:
-        return []
-
-    # PIMCO distribution data can be found at their fund pages
-    # The API endpoint pattern for distributions:
-    fund_slug_map = {
-        "PDI": "pimco-dynamic-income-fund/pdi",
-        "PTY": "pimco-corporate-income-opportunity-fund/pty",
-        "PCI": "pimco-dynamic-credit-income-fund/pci",
-        "PKO": "pimco-income-opportunity-fund/pko",
-        "PHK": "pimco-high-income-fund/phk",
-        "PCM": "pcm-fund/pcm",
-        "PFL": "pimco-income-strategy-fund/pfl",
-        "PFN": "pimco-income-strategy-fund-ii/pfn",
-        "PDO": "pimco-dynamic-income-opportunities-fund/pdo",
-        "PAXS": "pimco-access-income-fund/paxs",
-    }
-
-    slug = fund_slug_map.get(ticker.upper())
-    if not slug:
-        return []
-
-    try:
-        url = f"https://www.pimco.com/en-us/investments/closed-end-funds/{slug}"
-        resp = _requests.get(url, headers={
-            "User-Agent": "Mozilla/5.0 (compatible; InvestmentDashboard/1.0)",
-        }, timeout=15)
-        if resp.status_code != 200:
-            return []
-
-        text = resp.text
-        results = []
-
-        # Look for distribution table data in the HTML
-        # PIMCO pages typically list distributions in a table format
-        # Pattern: "Ex-Date: MM/DD/YYYY ... Per Share: $X.XXXX ... Payable: MM/DD/YYYY"
-        # Or table rows with dates and amounts
-
-        # Try to find per-share amounts and dates
-        amount_matches = re.findall(
-            r'\$(\d+\.\d{3,6})',
-            text,
-        )
-        date_matches = re.findall(
-            r'(\d{1,2}/\d{1,2}/\d{4})',
-            text,
-        )
-
-        # Parse the structured distribution data if available
-        dist_pattern = re.findall(
-            r'(?:ex[- ]?(?:date|dividend)[:\s]*)(\d{1,2}/\d{1,2}/\d{4})'
-            r'.*?(?:pay(?:able)?[- ]?date[:\s]*)(\d{1,2}/\d{1,2}/\d{4})'
-            r'.*?\$(\d+\.\d{3,6})',
-            text,
-            re.IGNORECASE | re.DOTALL,
-        )
-
-        for ex_str, pay_str, amt_str in dist_pattern:
-            try:
-                ex_date = dt.datetime.strptime(ex_str, "%m/%d/%Y").date()
-                pay_date = dt.datetime.strptime(pay_str, "%m/%d/%Y").date()
-                amount = float(amt_str)
-                results.append({
-                    "ex_dividend_date": ex_date,
-                    "payment_date": pay_date,
-                    "distribution_per_share": amount,
-                })
-            except (ValueError, IndexError):
-                continue
-
-        return results
-
-    except Exception as e:
-        logger.warning("PIMCO distribution fetch failed for %s: %s", ticker, e)
-        return []
-
-
-# ---------------------------------------------------------------------------
 # Helper utilities
 # ---------------------------------------------------------------------------
 
@@ -566,32 +263,20 @@ def get_verified_dividend_events(
     start_date: Optional[dt.date] = None,
     end_date: Optional[dt.date] = None,
 ) -> list[DividendEvent]:
-    """Return cross-validated DividendEvents for the ticker over the date range.
+    """Return cross-validated DividendEvents for the ticker.
 
-    Per-share amount priority:
-        1. SEC EDGAR 8-K (most authoritative)
-        2. PIMCO distribution page (PDI / PIMCO CEFs only)
-        3. FMP historical dividends API
-        4. yfinance ticker.dividends
-    If sources disagree by > $0.001: use highest-confidence source and
-    log a data quality warning.
-
-    Payment date priority:
-        1. SEC EDGAR 8-K payable date
-        2. PIMCO distribution page payable date (PDI only)
-        3. FMP paymentDate field
-        4. Estimated offset from ex-dividend date
-    If sources disagree by > 2 calendar days: use highest-confidence
-    source and log a data quality warning.
+    FMP-first waterfall:
+      Amount: FMP adjDividend (if non-null, non-zero) > yfinance
+      Payment date: FMP paymentDate (if non-null and after ex_date) > ESTIMATED
+      Ex-dividend date: Always yfinance (FMP used for cross-validation only)
+      Record/declaration date: FMP if available, else None
     """
     start_str = start_date.isoformat() if start_date else None
     end_str = end_date.isoformat() if end_date else None
 
-    # --- Fetch from all sources ---
+    # --- Fetch from both sources ---
     yf_divs = _fetch_yfinance_dividends(ticker, start=start_str, end=end_str)
     fmp_divs = _fetch_fmp_dividends(ticker)
-    sec_divs = _fetch_sec_dividends(ticker, max_filings=10)
-    pimco_divs = _fetch_pimco_distributions(ticker)
 
     # Build FMP lookup by ex-date
     fmp_lookup: dict[dt.date, dict] = {}
@@ -603,22 +288,7 @@ def get_verified_dividend_events(
             continue
         fmp_lookup[ex_d] = fd
 
-    # Build SEC lookup by ex-date (if available) or filing date proximity
-    sec_by_ex: dict[dt.date, dict] = {}
-    sec_by_pay: dict[dt.date, dict] = {}
-    for sd in sec_divs:
-        if "ex_dividend_date" in sd and sd["ex_dividend_date"]:
-            sec_by_ex[sd["ex_dividend_date"]] = sd
-        if "payment_date" in sd and sd["payment_date"]:
-            sec_by_pay[sd["payment_date"]] = sd
-
-    # Build PIMCO lookup by ex-date
-    pimco_lookup: dict[dt.date, dict] = {}
-    for pd_entry in pimco_divs:
-        if "ex_dividend_date" in pd_entry and pd_entry["ex_dividend_date"]:
-            pimco_lookup[pd_entry["ex_dividend_date"]] = pd_entry
-
-    # --- Build DividendEvents from yfinance as the base ---
+    # --- Build DividendEvents from yfinance as the date index ---
     events: list[DividendEvent] = []
     all_ex_dates = [d["ex_dividend_date"] for d in yf_divs]
     frequency = _detect_frequency(all_ex_dates)
@@ -636,9 +306,8 @@ def get_verified_dividend_events(
             yfinance_amount=yf_amount,
         )
 
-        # --- Match FMP data ---
+        # --- Match FMP data (exact match, then +/-1-2 day tolerance) ---
         fmp_data = fmp_lookup.get(ex_date)
-        # Try 1-day tolerance if exact match fails
         if fmp_data is None:
             for offset in [1, -1, 2, -2]:
                 candidate = ex_date + dt.timedelta(days=offset)
@@ -653,79 +322,26 @@ def get_verified_dividend_events(
             event.fmp_record_date = fmp_data.get("record_date")
             event.fmp_declaration_date = fmp_data.get("declaration_date")
 
-            # Use FMP payment date
-            if event.fmp_payment_date:
+            # --- Amount: FMP first if non-null and non-zero ---
+            if event.fmp_amount is not None and event.fmp_amount > 0:
+                event.distribution_per_share = event.fmp_amount
+                event.amount_source = "FMP"
+
+            # --- Payment date: FMP first if non-null and after ex_date ---
+            if event.fmp_payment_date and event.fmp_payment_date > ex_date:
                 event.payment_date = event.fmp_payment_date
                 event.payment_date_source = "FMP"
 
-            # Use FMP supplementary dates
+            # --- Record and declaration dates: FMP if available ---
             if event.fmp_record_date:
                 event.record_date = event.fmp_record_date
             if event.fmp_declaration_date:
                 event.declaration_date = event.fmp_declaration_date
 
-        # --- Match SEC EDGAR data ---
-        sec_data = sec_by_ex.get(ex_date)
-        # Try proximity match for SEC data
-        if sec_data is None:
-            for offset in range(-5, 6):
-                candidate = ex_date + dt.timedelta(days=offset)
-                if candidate in sec_by_ex:
-                    sec_data = sec_by_ex[candidate]
-                    break
-
-        if sec_data:
-            if "distribution_per_share" in sec_data:
-                event.sec_amount = sec_data["distribution_per_share"]
-            if "payment_date" in sec_data:
-                event.sec_payment_date = sec_data["payment_date"]
-
-            # SEC is highest authority for amounts
-            if event.sec_amount is not None and event.sec_amount > 0:
-                event.distribution_per_share = event.sec_amount
-                event.amount_source = "SEC_EDGAR"
-
-            # SEC is highest authority for payment dates
-            if event.sec_payment_date:
-                event.payment_date = event.sec_payment_date
-                event.payment_date_source = "SEC_EDGAR"
-
-        # --- Match PIMCO data ---
-        pimco_data = pimco_lookup.get(ex_date)
-        if pimco_data is None and ticker.upper() in _PIMCO_CEF_TICKERS:
-            for offset in range(-3, 4):
-                candidate = ex_date + dt.timedelta(days=offset)
-                if candidate in pimco_lookup:
-                    pimco_data = pimco_lookup[candidate]
-                    break
-
-        if pimco_data:
-            if "distribution_per_share" in pimco_data:
-                event.pimco_amount = pimco_data["distribution_per_share"]
-            if "payment_date" in pimco_data:
-                event.pimco_payment_date = pimco_data["payment_date"]
-
-            # PIMCO overrides FMP/yfinance for amounts (but not SEC)
-            if event.pimco_amount and event.amount_source != "SEC_EDGAR":
-                event.distribution_per_share = event.pimco_amount
-                event.amount_source = "PIMCO"
-
-            # PIMCO overrides FMP for payment dates (but not SEC)
-            if event.pimco_payment_date and event.payment_date_source != "SEC_EDGAR":
-                event.payment_date = event.pimco_payment_date
-                event.payment_date_source = "PIMCO"
-
         # --- Fill missing payment date with estimate ---
         if event.payment_date is None:
             event.payment_date = _estimate_payment_date(ex_date, frequency)
             event.payment_date_source = "ESTIMATED"
-
-        # --- Fill missing record date ---
-        if event.record_date is None:
-            rd = ex_date + dt.timedelta(days=1)
-            while rd.weekday() >= 5:
-                rd += dt.timedelta(days=1)
-            event.record_date = rd
 
         # --- Cross-validation ---
         _cross_validate_event(event)
@@ -736,38 +352,21 @@ def get_verified_dividend_events(
 
 
 def _cross_validate_event(event: DividendEvent) -> None:
-    """Cross-validate amounts and dates across sources. Populates
-    amount_verified, payment_date_verified, and data_quality_warnings."""
+    """Cross-validate amounts and dates across FMP and yfinance.
+    Populates amount_verified and data_quality_warnings."""
     warnings = []
 
     # --- Amount cross-validation ---
-    amounts = {}
-    if event.yfinance_amount is not None:
-        amounts["yfinance"] = event.yfinance_amount
-    if event.fmp_amount is not None:
-        amounts["FMP"] = event.fmp_amount
-    if event.sec_amount is not None:
-        amounts["SEC_EDGAR"] = event.sec_amount
-    if event.pimco_amount is not None:
-        amounts["PIMCO"] = event.pimco_amount
-
-    if len(amounts) >= 2:
-        vals = list(amounts.values())
-        all_agree = all(abs(v - vals[0]) <= 0.001 for v in vals)
-        if all_agree:
+    if event.yfinance_amount is not None and event.fmp_amount is not None:
+        if _amounts_agree(event.yfinance_amount, event.fmp_amount):
             event.amount_verified = True
         else:
             event.amount_verified = False
-            # Find disagreements
-            for src1, v1 in amounts.items():
-                for src2, v2 in amounts.items():
-                    if src1 >= src2:
-                        continue
-                    if abs(v1 - v2) > 0.001:
-                        warnings.append(
-                            f"Amount mismatch: {src1}=${v1:.4f} vs {src2}=${v2:.4f} "
-                            f"(diff=${abs(v1 - v2):.4f})"
-                        )
+            warnings.append(
+                f"Amount mismatch: yfinance=${event.yfinance_amount:.4f} vs "
+                f"FMP=${event.fmp_amount:.4f} "
+                f"(diff=${abs(event.yfinance_amount - event.fmp_amount):.4f})"
+            )
     else:
         event.amount_verified = False  # Only 1 source
 
@@ -778,36 +377,6 @@ def _cross_validate_event(event: DividendEvent) -> None:
                 f"Ex-date mismatch: yfinance={event.ex_dividend_date} vs "
                 f"FMP={event.fmp_ex_date} (diff={(event.fmp_ex_date - event.ex_dividend_date).days}d)"
             )
-
-    # --- Payment date cross-validation ---
-    pay_dates = {}
-    if event.fmp_payment_date:
-        pay_dates["FMP"] = event.fmp_payment_date
-    if event.sec_payment_date:
-        pay_dates["SEC_EDGAR"] = event.sec_payment_date
-    if event.pimco_payment_date:
-        pay_dates["PIMCO"] = event.pimco_payment_date
-
-    if len(pay_dates) >= 2:
-        dates_list = list(pay_dates.values())
-        all_agree = all(_dates_agree(d, dates_list[0], tolerance_days=2) for d in dates_list)
-        if all_agree:
-            event.payment_date_verified = True
-        else:
-            event.payment_date_verified = False
-            for src1, d1 in pay_dates.items():
-                for src2, d2 in pay_dates.items():
-                    if src1 >= src2:
-                        continue
-                    if not _dates_agree(d1, d2, tolerance_days=2):
-                        warnings.append(
-                            f"Payment date mismatch: {src1}={d1} vs {src2}={d2} "
-                            f"(diff={(d2 - d1).days}d)"
-                        )
-    elif len(pay_dates) == 1:
-        event.payment_date_verified = False  # Only 1 source
-    else:
-        event.payment_date_verified = False
 
     event.data_quality_warnings = warnings
 
@@ -888,52 +457,41 @@ def generate_diagnostic_report(
     tickers: list[str],
     num_events: int = 8,
 ) -> pd.DataFrame:
-    """Generate a diagnostic report comparing raw data from all sources
-    for the most recent N events of each ticker.
-
-    Returns a DataFrame with per-event comparison columns.
-    """
+    """Generate a diagnostic report comparing FMP vs yfinance data
+    for the most recent N events of each ticker."""
     rows = []
     for ticker in tickers:
         events = get_verified_dividend_events(ticker)
-        # Take most recent N events
         recent = events[-num_events:] if len(events) > num_events else events
 
         for event in recent:
-            ex_date_agree = "—"
+            ex_date_agree = "\u2014"
             if event.fmp_ex_date and event.ex_dividend_date:
-                ex_date_agree = "Y" if _dates_agree(
+                ex_date_agree = "\u2713" if _dates_agree(
                     event.ex_dividend_date, event.fmp_ex_date, 1
-                ) else "N"
+                ) else "\u26a0"
 
-            amount_agree = "—"
+            amount_agree = "\u2014"
             if event.fmp_amount is not None and event.yfinance_amount is not None:
-                amount_agree = "Y" if _amounts_agree(
+                amount_agree = "\u2713" if _amounts_agree(
                     event.yfinance_amount, event.fmp_amount
-                ) else "N"
+                ) else "\u26a0"
 
             rows.append({
                 "Ticker": ticker,
-                "yfinance Ex-Date": str(event.ex_dividend_date) if event.ex_dividend_date else "—",
-                "yfinance Dist/Share ($)": f"${event.yfinance_amount:.4f}" if event.yfinance_amount else "—",
-                "FMP Ex-Date": str(event.fmp_ex_date) if event.fmp_ex_date else "—",
-                "FMP Dist/Share ($)": f"${event.fmp_amount:.4f}" if event.fmp_amount is not None else "—",
-                "FMP Payment Date": str(event.fmp_payment_date) if event.fmp_payment_date else "—",
-                "FMP Record Date": str(event.fmp_record_date) if event.fmp_record_date else "—",
-                "FMP Declaration Date": str(event.fmp_declaration_date) if event.fmp_declaration_date else "—",
-                "Date Source Agreement": ex_date_agree,
-                "Amount Source Agreement": amount_agree,
-                "SEC Amount ($)": f"${event.sec_amount:.4f}" if event.sec_amount is not None else "—",
-                "SEC Payment Date": str(event.sec_payment_date) if event.sec_payment_date else "—",
-                "PIMCO Amount ($)": f"${event.pimco_amount:.4f}" if event.pimco_amount is not None else "—",
-                "PIMCO Payment Date": str(event.pimco_payment_date) if event.pimco_payment_date else "—",
-                "Final Amount ($)": f"${event.distribution_per_share:.4f}",
-                "Final Amount Source": event.amount_source,
-                "Amount Verified": "Y" if event.amount_verified else "N",
-                "Final Payment Date": str(event.payment_date) if event.payment_date else "—",
+                "Ex-Dividend Date": str(event.ex_dividend_date) if event.ex_dividend_date else "\u2014",
+                "yfinance Amount ($)": f"${event.yfinance_amount:.4f}" if event.yfinance_amount is not None else "\u2014",
+                "FMP Amount ($)": f"${event.fmp_amount:.4f}" if event.fmp_amount is not None else "\u2014",
+                "Amount Used ($)": f"${event.distribution_per_share:.4f}",
+                "Amount Source": event.amount_source,
+                "Amount Agreement": amount_agree,
+                "FMP Payment Date": str(event.fmp_payment_date) if event.fmp_payment_date else "\u2014",
+                "Estimated Payment Date": str(_estimate_payment_date(event.ex_dividend_date, event.frequency)) if event.ex_dividend_date else "\u2014",
+                "Payment Date Used": str(event.payment_date) if event.payment_date else "\u2014",
                 "Payment Date Source": event.payment_date_source,
-                "Pay Date Verified": "Y" if event.payment_date_verified else "N",
-                "Warnings": "; ".join(event.data_quality_warnings) if event.data_quality_warnings else "—",
+                "FMP Record Date": str(event.fmp_record_date) if event.fmp_record_date else "\u2014",
+                "FMP Declaration Date": str(event.fmp_declaration_date) if event.fmp_declaration_date else "\u2014",
+                "Warnings": "; ".join(event.data_quality_warnings) if event.data_quality_warnings else "\u2014",
             })
 
     if not rows:
