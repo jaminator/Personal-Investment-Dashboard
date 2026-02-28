@@ -1,5 +1,6 @@
 """
-ui_contributions.py — Recurring Contributions & Discrete Withdrawals UI (Features 2 & 3).
+ui_contributions.py — Recurring Contributions, Discrete Withdrawals,
+and Dividend History UI (Features 2 & 3).
 """
 
 from __future__ import annotations
@@ -10,6 +11,8 @@ import pandas as pd
 import streamlit as st
 
 from contributions import build_contribution_schedule, build_withdrawal_schedule
+from data_fetcher import fetch_current_price
+from dividend_verifier import get_verified_dividend_events
 from portfolio import FREQUENCIES, ContributionStream, PortfolioConfig, Withdrawal
 
 
@@ -21,7 +24,9 @@ def render_contributions(config: PortfolioConfig) -> None:
     """Render the contributions and withdrawals management panel."""
     st.header("Cash Flows")
 
-    tab_contrib, tab_withdraw = st.tabs(["Recurring Contributions", "Discrete Withdrawals"])
+    tab_contrib, tab_withdraw, tab_dividends = st.tabs(
+        ["Recurring Contributions", "Discrete Withdrawals", "Dividend History"]
+    )
 
     # ======================================================================
     # Contributions tab
@@ -91,7 +96,7 @@ def render_contributions(config: PortfolioConfig) -> None:
                     "Start": cs.start_date or "Portfolio start",
                     "End": cs.end_date or "No end",
                     "Allocation": cs.allocation_mode,
-                    "Target": cs.target_ticker or cs.target_sleeve or "—",
+                    "Target": cs.target_ticker or cs.target_sleeve or "\u2014",
                 })
             df = pd.DataFrame(rows)
             st.dataframe(df.drop(columns=["ID"]), width="stretch", hide_index=True)
@@ -160,7 +165,7 @@ def render_contributions(config: PortfolioConfig) -> None:
                     "Date": w.date,
                     "Amount": f"{w.amount:.1f}%" if w.is_percentage else _fmt(w.amount),
                     "Type": "% of Portfolio" if w.is_percentage else "Fixed $",
-                    "Label": w.label or "—",
+                    "Label": w.label or "\u2014",
                 })
             df = pd.DataFrame(rows)
             st.dataframe(df.drop(columns=["ID"]), width="stretch", hide_index=True)
@@ -174,3 +179,96 @@ def render_contributions(config: PortfolioConfig) -> None:
                 ids = {remove_opts_w[k] for k in to_remove_w}
                 config.withdrawals = [w for w in config.withdrawals if w.id not in ids]
                 st.rerun()
+
+    # ======================================================================
+    # Dividend History tab
+    # ======================================================================
+    with tab_dividends:
+        st.subheader("Dividend History")
+
+        tickers = config.tickers()
+        if not tickers:
+            st.info("Add holdings with tickers to see dividend history.")
+            return
+
+        two_years_ago = dt.date.today() - dt.timedelta(days=730)
+        all_rows = []
+
+        for t in tickers:
+            h = config.holding_by_ticker(t)
+            if not h:
+                continue
+
+            events = get_verified_dividend_events(t, start_date=two_years_ago)
+            shares_held = h.shares
+
+            for ev in events:
+                if not ev.ex_dividend_date:
+                    continue
+                gross = ev.distribution_per_share * shares_held
+                is_drip = h.drip_enabled
+                treatment = "DRIP" if is_drip else "Cash"
+
+                # For DRIP, estimate shares purchased at current price
+                drip_shares = 0.0
+                drip_price = 0.0
+                cash_added = 0.0
+                if is_drip:
+                    price = fetch_current_price(t)
+                    if price and price > 0:
+                        drip_price = price
+                        drip_shares = gross / price
+                else:
+                    cash_added = gross
+
+                pay_src_indicator = "\u2705" if ev.payment_date_source == "FMP" else "\u26a0\ufe0f"
+
+                all_rows.append({
+                    "Ex-Dividend Date": ev.ex_dividend_date,
+                    "Payment Date": ev.payment_date,
+                    "Pay Date Source": f"{pay_src_indicator} {ev.payment_date_source}",
+                    "Ticker": t,
+                    "Dist/Share ($)": ev.distribution_per_share,
+                    "Amount Source": ev.amount_source,
+                    "Shares Held": shares_held,
+                    "Gross Amount ($)": gross,
+                    "Treatment": treatment,
+                    "DRIP Shares": drip_shares if is_drip else None,
+                    "DRIP Price ($)": drip_price if is_drip else None,
+                    "Cash Added ($)": cash_added if not is_drip else None,
+                })
+
+        if not all_rows:
+            st.info("No dividend history available for current holdings.")
+            return
+
+        div_df = pd.DataFrame(all_rows)
+        div_df = div_df.sort_values("Ex-Dividend Date", ascending=False).reset_index(drop=True)
+
+        # Format display columns
+        display_df = div_df.copy()
+        display_df["Ex-Dividend Date"] = display_df["Ex-Dividend Date"].astype(str)
+        display_df["Payment Date"] = display_df["Payment Date"].astype(str)
+        display_df["Dist/Share ($)"] = display_df["Dist/Share ($)"].apply(lambda x: f"${x:.4f}")
+        display_df["Shares Held"] = display_df["Shares Held"].apply(lambda x: f"{x:,.2f}")
+        display_df["Gross Amount ($)"] = display_df["Gross Amount ($)"].apply(lambda x: f"${x:,.2f}")
+        display_df["DRIP Shares"] = display_df["DRIP Shares"].apply(
+            lambda x: f"{x:,.4f}" if x is not None and x > 0 else "\u2014"
+        )
+        display_df["DRIP Price ($)"] = display_df["DRIP Price ($)"].apply(
+            lambda x: f"${x:,.2f}" if x is not None and x > 0 else "\u2014"
+        )
+        display_df["Cash Added ($)"] = display_df["Cash Added ($)"].apply(
+            lambda x: f"${x:,.2f}" if x is not None and x > 0 else "\u2014"
+        )
+
+        st.dataframe(display_df, width="stretch", hide_index=True)
+
+        # Summary metrics
+        total_gross = div_df["Gross Amount ($)"].sum()
+        fmp_count = sum(1 for r in all_rows if "FMP" in r["Pay Date Source"])
+        est_count = sum(1 for r in all_rows if "ESTIMATED" in r["Pay Date Source"])
+        st.caption(
+            f"Total gross distributions: {_fmt(total_gross)} | "
+            f"FMP-sourced dates: {fmp_count} | Estimated dates: {est_count}"
+        )

@@ -335,7 +335,7 @@ def get_dividend_events(
     """Return a comprehensive dividend events table for *ticker*.
 
     Delegates to the **verified** dividend layer which cross-validates
-    across yfinance, FMP, SEC EDGAR, and PIMCO.
+    across yfinance and FMP.
 
     Columns: ex_dividend_date, declaration_date, record_date,
              payment_date, payment_date_source, dividend_per_share
