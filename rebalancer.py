@@ -91,6 +91,8 @@ class DividendRecord:
     treatment: str = "DRIP"  # "DRIP" / "Cash"
     drip_shares: float = 0.0
     drip_price: float = 0.0
+    drip_price_date: Optional[dt.date] = None
+    drip_price_source: str = ""  # "Historical" / "Estimated"
     cash_added: float = 0.0
 
 

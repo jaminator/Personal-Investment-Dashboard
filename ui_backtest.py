@@ -11,7 +11,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from analytics import compute_analytics, drawdown_series
-from backtester import BacktestResult, run_backtest, run_yield_sensitivity
+from backtester import BacktestResult, run_backtest
 from portfolio import PortfolioConfig
 from rebalancer import DividendRecord
 
@@ -253,27 +253,12 @@ def render_backtest(config: PortfolioConfig) -> None:
                 "Treatment": dr.treatment,
                 "DRIP Shares": f"{dr.drip_shares:.4f}" if dr.drip_shares > 0 else "—",
                 "DRIP Price": _fmt(dr.drip_price) if dr.drip_price > 0 else "—",
+                "DRIP Price Date": str(dr.drip_price_date) if getattr(dr, 'drip_price_date', None) else "—",
+                "DRIP Price Src": getattr(dr, 'drip_price_source', "") or "—",
                 "Cash Added": _fmt(dr.cash_added) if dr.cash_added > 0 else "—",
             })
         df_divs = pd.DataFrame(div_rows)
         st.dataframe(df_divs, width="stretch", hide_index=True)
-
-    # --- Yield sensitivity (Mode B) ----------------------------------------
-    mode_b_sleeves = [s for s in config.sleeves if s.mode.startswith("B")]
-    if mode_b_sleeves:
-        st.subheader("Yield Sensitivity Analysis")
-        for sleeve in mode_b_sleeves:
-            with st.expander(f"Sensitivity: {sleeve.name}"):
-                if st.button(f"Run Sensitivity for {sleeve.name}", key=f"sens_{sleeve.id}"):
-                    with st.spinner("Running sensitivity analysis..."):
-                        sens_df = run_yield_sensitivity(config, sleeve)
-                    if not sens_df.empty:
-                        st.dataframe(sens_df.style.format({
-                            "CAGR (%)": "{:.2f}%",
-                            "Volatility (%)": "{:.2f}%",
-                            "Max Drawdown (%)": "{:.2f}%",
-                            "Sharpe Ratio": "{:.3f}",
-                        }), width="stretch", hide_index=True)
 
     # --- Analytics ----------------------------------------------------------
     st.subheader("Backtest Analytics")

@@ -73,36 +73,29 @@ def _generate_dates(
             cur = dt.date(y, m, day)
 
     elif frequency == "Quarterly":
-        cur = start
-        while cur <= end:
-            dates.append(cur)
-            m = cur.month + 3
-            y = cur.year
-            while m > 12:
-                m -= 12
-                y += 1
-            day = min(cur.day, _days_in_month(y, m))
-            cur = dt.date(y, m, day)
+        # Use calendar quarter starts: Jan 1, Apr 1, Jul 1, Oct 1
+        quarter_starts = [1, 4, 7, 10]
+        for year in range(start.year, end.year + 1):
+            for m in quarter_starts:
+                d = dt.date(year, m, 1)
+                if d >= start and d <= end:
+                    dates.append(d)
 
     elif frequency == "Semi-Annually":
-        cur = start
-        while cur <= end:
-            dates.append(cur)
-            m = cur.month + 6
-            y = cur.year
-            while m > 12:
-                m -= 12
-                y += 1
-            day = min(cur.day, _days_in_month(y, m))
-            cur = dt.date(y, m, day)
+        # Use calendar half-year starts: Jan 1, Jul 1
+        half_starts = [1, 7]
+        for year in range(start.year, end.year + 1):
+            for m in half_starts:
+                d = dt.date(year, m, 1)
+                if d >= start and d <= end:
+                    dates.append(d)
 
     elif frequency == "Annually":
-        cur = start
-        while cur <= end:
-            dates.append(cur)
-            y = cur.year + 1
-            day = min(cur.day, _days_in_month(y, cur.month))
-            cur = dt.date(y, cur.month, day)
+        # Use Jan 1 of each year
+        for year in range(start.year, end.year + 1):
+            d = dt.date(year, 1, 1)
+            if d >= start and d <= end:
+                dates.append(d)
 
     return dates
 

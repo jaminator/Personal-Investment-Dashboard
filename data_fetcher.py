@@ -219,15 +219,12 @@ def fetch_fmp_dividends(ticker: str, api_key: str) -> pd.DataFrame:
     if not _fmp_rate_check():
         return pd.DataFrame()
 
-    url = f"{_FMP_BASE}/dividends"
+    url = f"{_FMP_BASE}/dividends?symbol={ticker}&apikey={api_key}"
     if FMP_DEBUG:
-        redacted = api_key[:len(api_key) - 20] + "******" if len(api_key) > 20 else "******"
-        print(f"[FMP CALL] URL: {url}?symbol={ticker}&apikey={redacted}")
+        print(f"[FMP CALL] URL: {url.replace(api_key, '***')}")
         print(f"[FMP CALL] Ticker: {ticker}, Function: fetch_fmp_dividends")
     try:
-        resp = _requests.get(
-            url, params={"symbol": ticker, "apikey": api_key}, timeout=10,
-        )
+        resp = _requests.get(url, timeout=10)
         if FMP_DEBUG:
             print(f"[FMP RESPONSE] Status code: {resp.status_code}")
             print(f"[FMP RESPONSE] Raw body (first 500 chars): {resp.text[:500]}")
@@ -308,16 +305,11 @@ def test_fmp_connection() -> dict:
         return result
 
     try:
-        profile_url = f"{_FMP_BASE}/profile"
+        profile_url = f"{_FMP_BASE}/profile?symbol=SPY&apikey={api_key}"
         if FMP_DEBUG:
-            redacted = api_key[:len(api_key) - 20] + "******" if len(api_key) > 20 else "******"
-            print(f"[FMP CALL] URL: {profile_url}?symbol=SPY&apikey={redacted}")
+            print(f"[FMP CALL] URL: {profile_url.replace(api_key, '***')}")
             print(f"[FMP CALL] Ticker: SPY, Function: test_fmp_connection")
-        resp = _requests.get(
-            profile_url,
-            params={"symbol": "SPY", "apikey": api_key},
-            timeout=10,
-        )
+        resp = _requests.get(profile_url, timeout=10)
         result["status_code"] = resp.status_code
         if FMP_DEBUG:
             print(f"[FMP RESPONSE] Status code: {resp.status_code}")
@@ -355,87 +347,6 @@ def test_fmp_connection() -> dict:
         result["error_message"] = f"Connection error: {exc}"
         result["rate_limit_remaining"] = _fmp_requests_remaining()
         return result
-
-
-# ---------------------------------------------------------------------------
-# FMP historical EOD price
-# ---------------------------------------------------------------------------
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def fetch_fmp_historical_price(
-    ticker: str,
-    from_date: Optional[str] = None,
-    to_date: Optional[str] = None,
-) -> pd.DataFrame:
-    """Fetch historical EOD prices from FMP ``/stable/historical-price-eod/full``.
-
-    Returns DataFrame with columns: date, open, high, low, close, volume, adjClose.
-    Sorted by date descending (most recent first).
-    Returns empty DataFrame when FMP is unavailable or has no data.
-    """
-    api_key = _get_fmp_api_key()
-    if _requests is None or not api_key:
-        return pd.DataFrame()
-    if not _fmp_rate_check():
-        return pd.DataFrame()
-
-    url = f"{_FMP_BASE}/historical-price-eod/full"
-    params: dict = {"symbol": ticker, "apikey": api_key}
-    if from_date:
-        params["from"] = from_date
-    if to_date:
-        params["to"] = to_date
-
-    if FMP_DEBUG:
-        redacted = api_key[:len(api_key) - 20] + "******" if len(api_key) > 20 else "******"
-        display_params = {k: v for k, v in params.items() if k != "apikey"}
-        print(f"[FMP CALL] URL: {url}?symbol={ticker}&apikey={redacted}")
-        print(f"[FMP CALL] Ticker: {ticker}, Function: fetch_fmp_historical_price, params={display_params}")
-    try:
-        resp = _requests.get(url, params=params, timeout=10)
-        if FMP_DEBUG:
-            print(f"[FMP RESPONSE] Status code: {resp.status_code}")
-            print(f"[FMP RESPONSE] Raw body (first 500 chars): {resp.text[:500]}")
-        if resp.status_code == 429 or "Limit Reach" in resp.text:
-            logger.warning("FMP rate limit reached for %s prices", ticker)
-            return pd.DataFrame()
-        if resp.status_code != 200:
-            logger.warning("FMP historical price HTTP %s for %s", resp.status_code, ticker)
-            return pd.DataFrame()
-        data = resp.json()
-        if isinstance(data, dict) and "Error Message" in data:
-            logger.warning("FMP price error for %s: %s", ticker, data["Error Message"])
-            return pd.DataFrame()
-        # Response: {"symbol": "...", "historical": [...]}
-        if isinstance(data, dict) and "historical" in data:
-            entries = data["historical"]
-        elif isinstance(data, list):
-            entries = data
-        else:
-            return pd.DataFrame()
-        if not entries:
-            return pd.DataFrame()
-    except Exception:
-        return pd.DataFrame()
-
-    rows = []
-    for entry in entries:
-        d = _parse_fmp_date(entry.get("date"))
-        if d is None:
-            continue
-        rows.append({
-            "date": d,
-            "open": float(entry.get("open", 0)),
-            "high": float(entry.get("high", 0)),
-            "low": float(entry.get("low", 0)),
-            "close": float(entry.get("close", 0)),
-            "volume": int(entry.get("volume", 0)),
-            "adjClose": float(entry.get("adjClose", entry.get("close", 0))),
-        })
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows).sort_values("date", ascending=False).reset_index(drop=True)
-    return df
 
 
 # ---------------------------------------------------------------------------

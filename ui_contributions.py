@@ -11,7 +11,7 @@ import pandas as pd
 import streamlit as st
 
 from contributions import build_contribution_schedule, build_withdrawal_schedule
-from data_fetcher import fetch_current_price
+from data_fetcher import fetch_current_price, fetch_history
 from dividend_verifier import get_verified_dividend_events
 from portfolio import FREQUENCIES, ContributionStream, PortfolioConfig, Withdrawal
 
@@ -209,16 +209,41 @@ def render_contributions(config: PortfolioConfig) -> None:
                 is_drip = h.drip_enabled
                 treatment = "DRIP" if is_drip else "Cash"
 
-                # For DRIP, estimate shares purchased at current price
+                # For DRIP, use closing price on payment_date
                 drip_shares = 0.0
                 drip_price = 0.0
+                drip_price_date = None
+                drip_price_source = ""
                 cash_added = 0.0
-                if is_drip:
-                    price = fetch_current_price(t)
-                    if price and price > 0:
-                        drip_price = price
-                        drip_shares = gross / price
-                else:
+                if is_drip and ev.payment_date:
+                    pay_str = str(ev.payment_date)
+                    # Fetch a small window around payment date
+                    pay_start = str(ev.payment_date - dt.timedelta(days=5))
+                    pay_end = str(ev.payment_date + dt.timedelta(days=10))
+                    hist = fetch_history(t, start=pay_start, end=pay_end)
+                    if not hist.empty and "Close" in hist.columns:
+                        pay_ts = pd.Timestamp(ev.payment_date)
+                        if pay_ts in hist.index:
+                            drip_price = float(hist["Close"].loc[pay_ts])
+                            drip_price_date = ev.payment_date
+                            drip_price_source = "Historical"
+                        else:
+                            # Payment date is non-trading day; use next available
+                            after = hist[hist.index >= pay_ts]
+                            if not after.empty:
+                                drip_price = float(after["Close"].iloc[0])
+                                drip_price_date = after.index[0].date() if hasattr(after.index[0], 'date') else after.index[0]
+                                drip_price_source = "Historical"
+                    # Fallback to current price if historical not available
+                    if drip_price <= 0:
+                        price = fetch_current_price(t)
+                        if price and price > 0:
+                            drip_price = price
+                            drip_price_date = dt.date.today()
+                            drip_price_source = "Estimated"
+                    if drip_price > 0:
+                        drip_shares = gross / drip_price
+                elif not is_drip:
                     cash_added = gross
 
                 pay_src_indicator = "\u2705" if ev.payment_date_source == "FMP" else "\u26a0\ufe0f"
@@ -235,6 +260,8 @@ def render_contributions(config: PortfolioConfig) -> None:
                     "Treatment": treatment,
                     "DRIP Shares": drip_shares if is_drip else None,
                     "DRIP Price ($)": drip_price if is_drip else None,
+                    "DRIP Price Date": str(drip_price_date) if drip_price_date else None,
+                    "DRIP Price Source": drip_price_source if is_drip else None,
                     "Cash Added ($)": cash_added if not is_drip else None,
                 })
 
@@ -257,6 +284,12 @@ def render_contributions(config: PortfolioConfig) -> None:
         )
         display_df["DRIP Price ($)"] = display_df["DRIP Price ($)"].apply(
             lambda x: f"${x:,.2f}" if x is not None and x > 0 else "\u2014"
+        )
+        display_df["DRIP Price Date"] = display_df["DRIP Price Date"].apply(
+            lambda x: str(x) if x is not None else "\u2014"
+        )
+        display_df["DRIP Price Source"] = display_df["DRIP Price Source"].apply(
+            lambda x: x if x else "\u2014"
         )
         display_df["Cash Added ($)"] = display_df["Cash Added ($)"].apply(
             lambda x: f"${x:,.2f}" if x is not None and x > 0 else "\u2014"

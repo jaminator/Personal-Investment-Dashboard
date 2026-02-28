@@ -327,7 +327,5 @@ def default_portfolio() -> PortfolioConfig:
     )
     pc.sleeves = [sleeve]
 
-    pc.contributions = [
-        ContributionStream(amount=500.0, frequency="Monthly"),
-    ]
+    pc.contributions = []
     return pc
