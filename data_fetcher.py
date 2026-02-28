@@ -135,17 +135,57 @@ def fetch_multiple_dividend_histories(
 # ---------------------------------------------------------------------------
 
 _FMP_BASE = "https://financialmodelingprep.com/api/v3"
+_FMP_DAILY_LIMIT = 250
+_FMP_WARN_THRESHOLD = 240
 
 
 def _get_fmp_api_key() -> Optional[str]:
-    """Read FMP API key from Streamlit secrets or session state."""
+    """Read FMP API key exclusively from Streamlit secrets.
+
+    Expected secrets.toml layout::
+
+        [api_keys]
+        FMP_API_KEY = "your-key-here"
+    """
     try:
-        key = st.secrets.get("FMP_API_KEY", "")
+        key = st.secrets["api_keys"]["FMP_API_KEY"]
         if key:
             return str(key)
-    except Exception:
+    except (KeyError, FileNotFoundError, Exception):
         pass
-    return st.session_state.get("fmp_api_key", "") or None
+    return None
+
+
+def _fmp_rate_check() -> bool:
+    """Return True if an FMP request is allowed (under daily limit).
+
+    Increments the counter stored in ``st.session_state["fmp_request_count"]``.
+    Logs a warning when approaching the limit and blocks at the limit.
+    """
+    count = st.session_state.get("fmp_request_count", 0)
+    if count >= _FMP_DAILY_LIMIT:
+        logger.warning("FMP daily rate limit reached (%s/%s)", count, _FMP_DAILY_LIMIT)
+        return False
+    if count >= _FMP_WARN_THRESHOLD:
+        logger.warning("FMP rate limit approaching (%s/%s)", count, _FMP_DAILY_LIMIT)
+    st.session_state["fmp_request_count"] = count + 1
+    return True
+
+
+def _fmp_requests_remaining() -> int:
+    """Return how many FMP requests remain today."""
+    count = st.session_state.get("fmp_request_count", 0)
+    return max(0, _FMP_DAILY_LIMIT - count)
+
+
+def _parse_fmp_date(val) -> Optional[dt.date]:
+    """Parse a date string from an FMP response."""
+    if not val:
+        return None
+    try:
+        return dt.date.fromisoformat(str(val))
+    except (ValueError, TypeError):
+        return None
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -157,15 +197,28 @@ def fetch_fmp_dividends(ticker: str, api_key: str) -> pd.DataFrame:
         dividend_per_share, payment_date_source
     All dates are ``datetime.date`` objects.
     Returns empty DataFrame when FMP is unavailable or has no data.
+
+    Uses the **adjDividend** field (split-adjusted) rather than the raw
+    ``dividend`` field so amounts align with yfinance's split-adjusted
+    history.
     """
     if _requests is None or not api_key:
         return pd.DataFrame()
+    if not _fmp_rate_check():
+        return pd.DataFrame()
+
     url = f"{_FMP_BASE}/historical-price-full/stock_dividend/{ticker}"
     try:
         resp = _requests.get(url, params={"apikey": api_key}, timeout=10)
         if resp.status_code != 200:
             return pd.DataFrame()
         data = resp.json()
+        # Handle FMP error responses
+        if isinstance(data, dict) and "Error Message" in data:
+            logger.warning("FMP error for %s: %s", ticker, data["Error Message"])
+            return pd.DataFrame()
+        if isinstance(data, list) and len(data) == 0:
+            return pd.DataFrame()
         if not data or "historical" not in data:
             return pd.DataFrame()
     except Exception:
@@ -173,24 +226,20 @@ def fetch_fmp_dividends(ticker: str, api_key: str) -> pd.DataFrame:
 
     rows = []
     for entry in data["historical"]:
-        def _parse_date(val):
-            if not val:
-                return None
-            try:
-                return dt.date.fromisoformat(str(val))
-            except (ValueError, TypeError):
-                return None
-
         # FMP uses "date" for the ex-dividend date in this endpoint
-        ex_date = _parse_date(entry.get("date"))
+        ex_date = _parse_fmp_date(entry.get("date"))
         if ex_date is None:
             continue
+        # Use adjDividend (split-adjusted) for consistency with yfinance
+        adj_div = entry.get("adjDividend")
+        if adj_div is None:
+            adj_div = entry.get("dividend", 0)
         rows.append({
             "ex_dividend_date": ex_date,
-            "declaration_date": _parse_date(entry.get("declarationDate")),
-            "record_date": _parse_date(entry.get("recordDate")),
-            "payment_date": _parse_date(entry.get("paymentDate")),
-            "dividend_per_share": float(entry.get("dividend", 0) or 0),
+            "declaration_date": _parse_fmp_date(entry.get("declarationDate")),
+            "record_date": _parse_fmp_date(entry.get("recordDate")),
+            "payment_date": _parse_fmp_date(entry.get("paymentDate")),
+            "dividend_per_share": float(adj_div or 0),
             "payment_date_source": "FMP",
         })
 
@@ -200,29 +249,60 @@ def fetch_fmp_dividends(ticker: str, api_key: str) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def validate_fmp_key(api_key: str) -> str:
-    """Check FMP API key validity.  Returns 'valid', 'invalid', or 'error'."""
-    if _requests is None or not api_key:
-        return "error"
+def test_fmp_connection() -> dict:
+    """Test FMP API connectivity and key validity.
+
+    Returns a dict with keys:
+        connected (bool), status_code (int | None),
+        error_message (str), rate_limit_remaining (int).
+    """
+    result = {
+        "connected": False,
+        "status_code": None,
+        "error_message": "",
+        "rate_limit_remaining": _fmp_requests_remaining(),
+    }
+    api_key = _get_fmp_api_key()
+    if not api_key:
+        result["error_message"] = "No FMP API key found in .streamlit/secrets.toml"
+        return result
+    if _requests is None:
+        result["error_message"] = "requests library not installed"
+        return result
+    if not _fmp_rate_check():
+        result["error_message"] = "FMP daily rate limit reached"
+        result["rate_limit_remaining"] = 0
+        return result
+
     try:
         resp = _requests.get(
-            f"{_FMP_BASE}/historical-price-full/stock_dividend/AAPL",
+            f"{_FMP_BASE}/profile/SPY",
             params={"apikey": api_key},
             timeout=10,
         )
+        result["status_code"] = resp.status_code
+
         if resp.status_code == 200:
             data = resp.json()
-            if isinstance(data, dict) and "historical" in data:
-                return "valid"
-            # Rate-limit or invalid key often returns error message
             if isinstance(data, dict) and "Error Message" in data:
-                return "invalid"
-        if resp.status_code == 403:
-            return "invalid"
-        return "error"
-    except Exception:
-        return "error"
+                result["error_message"] = data["Error Message"]
+            elif isinstance(data, list) and len(data) == 0:
+                result["error_message"] = "Empty response — key may be invalid"
+            elif isinstance(data, list) and len(data) > 0:
+                result["connected"] = True
+            else:
+                result["connected"] = True
+        elif resp.status_code == 403:
+            result["error_message"] = "FMP key invalid or rate-limited (403)"
+        else:
+            result["error_message"] = f"FMP returned HTTP {resp.status_code}"
+
+        result["rate_limit_remaining"] = _fmp_requests_remaining()
+        return result
+    except Exception as exc:
+        result["error_message"] = f"Connection error: {exc}"
+        result["rate_limit_remaining"] = _fmp_requests_remaining()
+        return result
 
 
 # ---------------------------------------------------------------------------

@@ -20,6 +20,26 @@ pip install -r requirements.txt
 streamlit run main.py
 ```
 
+## API Keys (FMP)
+
+The dashboard uses [Financial Modeling Prep](https://financialmodelingprep.com/)
+(free tier, 250 requests/day) for accurate dividend payment dates and
+split-adjusted amounts.
+
+1. Copy the example secrets file:
+   ```bash
+   cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+   ```
+2. Edit `.streamlit/secrets.toml` and paste your FMP API key:
+   ```toml
+   [api_keys]
+   FMP_API_KEY = "your-key-here"
+   ```
+3. **Never commit** `secrets.toml` — it is already in `.gitignore`.
+
+Without an FMP key the dashboard falls back to yfinance data with estimated
+payment dates.
+
 ## Tech Stack
 
 - **UI**: Streamlit
