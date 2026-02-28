@@ -321,36 +321,32 @@ def test_f_stable_endpoints():
     else:
         log("FAIL", f"F2: Expected /stable base, got {dividend_verifier._FMP_BASE!r}")
 
-    # F3 — data_fetcher dividend URL uses /dividends with symbol param
+    # F3 — data_fetcher dividend URL uses /dividends with symbol in URL string
     df_src = inspect.getsource(data_fetcher.fetch_fmp_dividends)
-    if "/dividends" in df_src and '"symbol"' in df_src:
-        log("PASS", "F3: data_fetcher uses /dividends?symbol={ticker}")
+    if "/dividends?symbol=" in df_src and "apikey=" in df_src:
+        log("PASS", "F3: data_fetcher uses /dividends?symbol={ticker}&apikey= in URL")
     else:
-        log("FAIL", "F3: data_fetcher should use /dividends with symbol param")
+        log("FAIL", "F3: data_fetcher should use /dividends with symbol and apikey in URL string")
 
-    # F4 — dividend_verifier dividend URL uses /dividends with symbol param
+    # F4 — dividend_verifier dividend URL uses /dividends with symbol in URL string
     dv_src = inspect.getsource(dividend_verifier._fetch_fmp_dividends)
-    if "/dividends" in dv_src and '"symbol"' in dv_src:
-        log("PASS", "F4: dividend_verifier uses /dividends?symbol={ticker}")
+    if "/dividends?symbol=" in dv_src and "apikey=" in dv_src:
+        log("PASS", "F4: dividend_verifier uses /dividends?symbol={ticker}&apikey= in URL")
     else:
-        log("FAIL", "F4: dividend_verifier should use /dividends with symbol param")
+        log("FAIL", "F4: dividend_verifier should use /dividends with symbol and apikey in URL string")
 
-    # F5 — Profile URL uses /profile with symbol param
+    # F5 — Profile URL uses /profile with symbol in URL string
     conn_src = inspect.getsource(data_fetcher.test_fmp_connection)
-    if "/profile" in conn_src and '"symbol"' in conn_src:
-        log("PASS", "F5: test_fmp_connection uses /profile?symbol=SPY")
+    if "/profile?symbol=" in conn_src and "apikey=" in conn_src:
+        log("PASS", "F5: test_fmp_connection uses /profile?symbol=SPY&apikey= in URL")
     else:
-        log("FAIL", "F5: test_fmp_connection should use /profile with symbol param")
+        log("FAIL", "F5: test_fmp_connection should use /profile with symbol and apikey in URL string")
 
-    # F6 — Historical price endpoint exists
-    if hasattr(data_fetcher, "fetch_fmp_historical_price"):
-        hp_src = inspect.getsource(data_fetcher.fetch_fmp_historical_price)
-        if "historical-price-eod/full" in hp_src:
-            log("PASS", "F6: fetch_fmp_historical_price uses /historical-price-eod/full")
-        else:
-            log("FAIL", "F6: fetch_fmp_historical_price should use /historical-price-eod/full")
+    # F6 — Historical price endpoint removed (yfinance is sole price source)
+    if not hasattr(data_fetcher, "fetch_fmp_historical_price"):
+        log("PASS", "F6: fetch_fmp_historical_price removed (yfinance is sole price source)")
     else:
-        log("FAIL", "F6: fetch_fmp_historical_price function not found")
+        log("FAIL", "F6: fetch_fmp_historical_price should be removed")
 
     # F7 — Frequency field extracted in data_fetcher
     if "fmp_frequency" in df_src and '"frequency"' in df_src:

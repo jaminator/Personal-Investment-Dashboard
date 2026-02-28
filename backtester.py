@@ -226,7 +226,36 @@ def run_backtest(config: PortfolioConfig) -> BacktestResult:
                 still_pending = []
                 for pay_date, amount, ex_date_ref in pending:
                     if d >= pay_date:
-                        price = prices_today.get(ticker, 0.0)
+                        # Use payment_date closing price (not today's price)
+                        # Look up the actual payment_date price from historical data
+                        price = 0.0
+                        drip_price_date = pay_date
+                        drip_price_source = "Historical"
+                        if ticker in prices_df.columns:
+                            pay_ts = pd.Timestamp(pay_date)
+                            if pay_ts in prices_df.index:
+                                price = float(prices_df[ticker].loc[pay_ts])
+                            else:
+                                # Payment date is non-trading day; use next available
+                                mask = prices_df.index >= pay_ts
+                                if mask.any():
+                                    next_idx = prices_df.index[mask][0]
+                                    price = float(prices_df[ticker].loc[next_idx])
+                                    drip_price_date = next_idx.date() if hasattr(next_idx, 'date') else next_idx
+                                else:
+                                    # Fallback to most recent available price
+                                    price = prices_today.get(ticker, 0.0)
+                                    drip_price_date = d
+                                    drip_price_source = "Estimated"
+                            if pd.isna(price):
+                                price = prices_today.get(ticker, 0.0)
+                                drip_price_date = d
+                                drip_price_source = "Estimated"
+                        else:
+                            price = prices_today.get(ticker, 0.0)
+                            drip_price_date = d
+                            drip_price_source = "Estimated"
+
                         if price > 0:
                             new_shares = amount / price
                             ss.positions[ticker] = ss.positions.get(ticker, 0.0) + new_shares
@@ -239,6 +268,8 @@ def run_backtest(config: PortfolioConfig) -> BacktestResult:
                                         and dr.drip_shares == 0.0):
                                     dr.drip_shares = new_shares
                                     dr.drip_price = price
+                                    dr.drip_price_date = drip_price_date
+                                    dr.drip_price_source = drip_price_source
                                     break
                     else:
                         still_pending.append((pay_date, amount, ex_date_ref))
@@ -405,49 +436,3 @@ def run_backtest(config: PortfolioConfig) -> BacktestResult:
             result.benchmark_values[bt] = bench
 
     return result
-
-
-# ---------------------------------------------------------------------------
-# Mode B yield sensitivity analysis
-# ---------------------------------------------------------------------------
-
-def run_yield_sensitivity(
-    config: PortfolioConfig,
-    sleeve: Sleeve,
-    yield_range: list[float] = None,
-) -> pd.DataFrame:
-    """Re-run backtest across a range of yield assumptions for Mode B sleeve.
-    Returns DataFrame with columns: Yield, CAGR, Volatility, Max Drawdown, Sharpe."""
-    from analytics import (
-        annualized_cagr,
-        annualized_volatility,
-        max_drawdown,
-        sharpe_ratio,
-    )
-
-    if yield_range is None:
-        yield_range = [6.0, 8.0, 10.0, 12.0, 14.0, 16.0]
-
-    rows = []
-    original_yield = sleeve.annualized_yield_pct
-
-    for y in yield_range:
-        sleeve.annualized_yield_pct = y
-        result = run_backtest(config)
-        if result.portfolio_values.empty:
-            continue
-        rets = result.portfolio_values.pct_change().dropna()
-        dd, _, _ = max_drawdown(result.portfolio_values)
-        rows.append({
-            "Yield (%)": y,
-            "CAGR (%)": annualized_cagr(result.portfolio_values) * 100,
-            "Volatility (%)": annualized_volatility(rets) * 100,
-            "Max Drawdown (%)": dd * 100,
-            "Sharpe Ratio": sharpe_ratio(rets),
-        })
-
-    sleeve.annualized_yield_pct = original_yield
-
-    if not rows:
-        return pd.DataFrame()
-    return pd.DataFrame(rows)

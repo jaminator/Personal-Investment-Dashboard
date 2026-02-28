@@ -21,6 +21,37 @@ from ui_sleeves import render_sleeves
 
 
 # ---------------------------------------------------------------------------
+# FMP API key diagnostic (runs once at startup)
+# ---------------------------------------------------------------------------
+
+def diagnose_fmp_key():
+    import requests
+
+    try:
+        key = st.secrets["api_keys"]["FMP_API_KEY"].strip()
+    except Exception as e:
+        print(f"[FMP KEY ERROR] Cannot read key: {e}")
+        return
+
+    print(f"[FMP KEY] Length={len(key)}, "
+          f"Starts={key[:3]}, Ends={key[-3:]}")
+
+    test_url = (
+        f"https://financialmodelingprep.com/stable/"
+        f"dividends?symbol=SPY&apikey={key}"
+    )
+    print(f"[FMP TEST] Calling: {test_url.replace(key, '***')}")
+
+    try:
+        resp = requests.get(test_url, timeout=10)
+        print(f"[FMP TEST] Status: {resp.status_code}")
+        print(f"[FMP TEST] Body (first 300 chars): "
+              f"{resp.text[:300]}")
+    except Exception as e:
+        print(f"[FMP TEST] Request failed: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Page config
 # ---------------------------------------------------------------------------
 
@@ -30,6 +61,15 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ---------------------------------------------------------------------------
+# One-time startup tasks
+# ---------------------------------------------------------------------------
+
+if "fmp_diagnosed" not in st.session_state:
+    diagnose_fmp_key()
+    st.cache_data.clear()
+    st.session_state["fmp_diagnosed"] = True
 
 # ---------------------------------------------------------------------------
 # Session state initialisation

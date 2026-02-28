@@ -155,15 +155,12 @@ def _fetch_fmp_dividends(ticker: str) -> list[dict]:
     if not _fmp_rate_check():
         return []
 
-    url = f"{_FMP_BASE}/dividends"
+    url = f"{_FMP_BASE}/dividends?symbol={ticker}&apikey={api_key}"
     if FMP_DEBUG:
-        redacted = api_key[:len(api_key) - 20] + "******" if len(api_key) > 20 else "******"
-        print(f"[FMP CALL] URL: {url}?symbol={ticker}&apikey={redacted}")
+        print(f"[FMP CALL] URL: {url.replace(api_key, '***')}")
         print(f"[FMP CALL] Ticker: {ticker}, Function: _fetch_fmp_dividends")
     try:
-        resp = _requests.get(
-            url, params={"symbol": ticker, "apikey": api_key}, timeout=10,
-        )
+        resp = _requests.get(url, timeout=10)
         if FMP_DEBUG:
             print(f"[FMP RESPONSE] Status code: {resp.status_code}")
             print(f"[FMP RESPONSE] Raw body (first 500 chars): {resp.text[:500]}")
