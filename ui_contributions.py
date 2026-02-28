@@ -94,7 +94,7 @@ def render_contributions(config: PortfolioConfig) -> None:
                     "Target": cs.target_ticker or cs.target_sleeve or "—",
                 })
             df = pd.DataFrame(rows)
-            st.dataframe(df.drop(columns=["ID"]), use_container_width=True, hide_index=True)
+            st.dataframe(df.drop(columns=["ID"]), width="stretch", hide_index=True)
 
             # Remove
             remove_opts = {
@@ -118,7 +118,7 @@ def render_contributions(config: PortfolioConfig) -> None:
                 # Show first 50 rows
                 display = sched[["date", "amount"]].copy()
                 display["amount"] = display["amount"].apply(_fmt)
-                st.dataframe(display.head(50), use_container_width=True, hide_index=True)
+                st.dataframe(display.head(50), width="stretch", hide_index=True)
                 if len(sched) > 50:
                     st.caption(f"Showing first 50 of {len(sched)} scheduled contributions.")
             else:
@@ -163,7 +163,7 @@ def render_contributions(config: PortfolioConfig) -> None:
                     "Label": w.label or "—",
                 })
             df = pd.DataFrame(rows)
-            st.dataframe(df.drop(columns=["ID"]), use_container_width=True, hide_index=True)
+            st.dataframe(df.drop(columns=["ID"]), width="stretch", hide_index=True)
 
             remove_opts_w = {
                 f"{w.label or w.date} ({w.id})": w.id

@@ -51,7 +51,7 @@ def render_sleeves(config: PortfolioConfig) -> None:
                 "% of Portfolio": _pct(sleeve_val / total_val) if total_val > 0 else "0.00%",
                 "Rebalancing Mode": s.mode,
             })
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     # --- Cross-sleeve toggle ------------------------------------------------
     config.cross_sleeve_cash_pooling = st.checkbox(

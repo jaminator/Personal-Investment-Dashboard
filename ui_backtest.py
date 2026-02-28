@@ -89,7 +89,7 @@ def render_backtest(config: PortfolioConfig) -> None:
         hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
     # --- Sleeve breakdown ---------------------------------------------------
     if result.sleeve_values:
@@ -107,7 +107,7 @@ def render_backtest(config: PortfolioConfig) -> None:
             yaxis_tickformat="$,.0f",
             hovermode="x unified",
         )
-        st.plotly_chart(fig_s, use_container_width=True)
+        st.plotly_chart(fig_s, width="stretch")
 
     # --- Drawdown chart -----------------------------------------------------
     st.subheader("Drawdown (Underwater) Chart")
@@ -127,7 +127,7 @@ def render_backtest(config: PortfolioConfig) -> None:
             yaxis_tickformat=".1%",
             hovermode="x unified",
         )
-        st.plotly_chart(fig_dd, use_container_width=True)
+        st.plotly_chart(fig_dd, width="stretch")
 
     # --- Trade log ----------------------------------------------------------
     if result.trade_log:
@@ -180,7 +180,7 @@ def render_backtest(config: PortfolioConfig) -> None:
                     "Note": tr.note or "—",
                 })
         df_trades = pd.DataFrame(trade_rows)
-        st.dataframe(df_trades, use_container_width=True, hide_index=True)
+        st.dataframe(df_trades, width="stretch", hide_index=True)
 
         # Mode B signal visualization
         mode_b_trades = [t for t in result.trade_log if t.signal_amount > 0]
@@ -229,7 +229,7 @@ def render_backtest(config: PortfolioConfig) -> None:
                 yaxis_tickformat="$,.0f",
                 hovermode="x unified",
             )
-            st.plotly_chart(fig_sig, use_container_width=True)
+            st.plotly_chart(fig_sig, width="stretch")
 
     # --- Dividend log -------------------------------------------------------
     if result.dividend_log:
@@ -256,7 +256,7 @@ def render_backtest(config: PortfolioConfig) -> None:
                 "Cash Added": _fmt(dr.cash_added) if dr.cash_added > 0 else "—",
             })
         df_divs = pd.DataFrame(div_rows)
-        st.dataframe(df_divs, use_container_width=True, hide_index=True)
+        st.dataframe(df_divs, width="stretch", hide_index=True)
 
     # --- Yield sensitivity (Mode B) ----------------------------------------
     mode_b_sleeves = [s for s in config.sleeves if s.mode.startswith("B")]
@@ -273,7 +273,7 @@ def render_backtest(config: PortfolioConfig) -> None:
                             "Volatility (%)": "{:.2f}%",
                             "Max Drawdown (%)": "{:.2f}%",
                             "Sharpe Ratio": "{:.3f}",
-                        }), use_container_width=True, hide_index=True)
+                        }), width="stretch", hide_index=True)
 
     # --- Analytics ----------------------------------------------------------
     st.subheader("Backtest Analytics")
@@ -300,4 +300,4 @@ def _display_metrics(metrics: dict) -> None:
             formatted = str(val)
         rows.append({"Metric": key, "Value": formatted})
     df = pd.DataFrame(rows)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, width="stretch", hide_index=True)
