@@ -63,6 +63,9 @@ def run_diagnostic_report() -> None:
 
         print(f"  yfinance: {len(yf_divs)} events")
         print(f"  FMP:      {len(fmp_divs)} events")
+        if fmp_divs:
+            fmp_freq = fmp_divs[-1].get("fmp_frequency", "N/A")
+            print(f"  FMP frequency field: {fmp_freq!r}")
 
         # Get verified events
         events = get_verified_dividend_events(ticker)
@@ -136,7 +139,8 @@ def test_1_fmp_payment_dates() -> bool:
         for ev in recent:
             src = ev.payment_date_source
             print(f"  {ticker} {ev.ex_dividend_date}: "
-                  f"payment_date={ev.payment_date} source={src}")
+                  f"payment_date={ev.payment_date} source={src} "
+                  f"freq={ev.frequency} freq_source={ev.frequency_source}")
             if src == "FMP":
                 fmp_count += 1
 

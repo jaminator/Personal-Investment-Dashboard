@@ -32,6 +32,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 _FMP_BASE = "https://financialmodelingprep.com/stable"
+FMP_DEBUG = False
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +49,7 @@ class DividendEvent:
     declaration_date: Optional[dt.date] = None
     distribution_per_share: float = 0.0
     frequency: int = 0                        # 12, 4, 2, or 1
+    frequency_source: str = "Calculated"      # "FMP" | "Calculated"
     payment_date_source: str = "ESTIMATED"    # "FMP" | "ESTIMATED"
     amount_source: str = "yfinance"           # "FMP" | "yfinance"
     amount_verified: bool = False             # True if both sources agree
@@ -113,7 +115,7 @@ def _get_fmp_api_key() -> Optional[str]:
     try:
         key = st.secrets["api_keys"]["FMP_API_KEY"]
         if key:
-            return str(key)
+            return str(key).strip()
     except (KeyError, FileNotFoundError, Exception):
         pass
     return None
@@ -128,10 +130,19 @@ def _fmp_rate_check() -> bool:
         return True
 
 
+_FMP_FREQUENCY_MAP = {
+    "monthly": 12,
+    "quarterly": 4,
+    "semi-annual": 2,
+    "annual": 1,
+}
+
+
 def _fetch_fmp_dividends(ticker: str) -> list[dict]:
-    """Fetch dividend data from FMP. Returns list of dicts with
-    ex_dividend_date, payment_date, record_date, declaration_date,
-    dividend_per_share.
+    """Fetch dividend data from FMP ``/stable/dividends``.
+
+    Returns list of dicts with ex_dividend_date, payment_date,
+    record_date, declaration_date, dividend_per_share, fmp_frequency.
 
     Uses the **adjDividend** field (split-adjusted) for consistency
     with yfinance's split-adjusted dividend history.
@@ -145,27 +156,38 @@ def _fetch_fmp_dividends(ticker: str) -> list[dict]:
         return []
 
     url = f"{_FMP_BASE}/dividends"
+    if FMP_DEBUG:
+        redacted = api_key[:len(api_key) - 20] + "******" if len(api_key) > 20 else "******"
+        print(f"[FMP CALL] URL: {url}?symbol={ticker}&apikey={redacted}")
+        print(f"[FMP CALL] Ticker: {ticker}, Function: _fetch_fmp_dividends")
     try:
         resp = _requests.get(
             url, params={"symbol": ticker, "apikey": api_key}, timeout=10,
         )
+        if FMP_DEBUG:
+            print(f"[FMP RESPONSE] Status code: {resp.status_code}")
+            print(f"[FMP RESPONSE] Raw body (first 500 chars): {resp.text[:500]}")
+        # Handle rate-limit or error responses
+        if resp.status_code == 429 or "Limit Reach" in resp.text:
+            logger.warning("FMP rate limit reached for %s", ticker)
+            return []
         if resp.status_code != 200:
             logger.warning("FMP dividends HTTP %s for %s", resp.status_code, ticker)
             return []
         data = resp.json()
-        # Handle FMP error responses
+        # Handle FMP error responses — stable API returns a flat list
         if isinstance(data, dict) and "Error Message" in data:
             logger.warning("FMP error for %s: %s", ticker, data["Error Message"])
             return []
-        # Stable API returns a flat list; legacy returned {"historical": [...]}
-        if isinstance(data, dict) and "historical" in data:
-            entries = data["historical"]
-        elif isinstance(data, list):
-            entries = data
-        else:
+        if not isinstance(data, list):
+            logger.warning("FMP unexpected response type for %s: %s", ticker, type(data).__name__)
             return []
+        entries = data
         if not entries:
             return []
+        if FMP_DEBUG:
+            print(f"[FMP PARSED] Events found: {len(entries)}")
+            print(f"[FMP PARSED] First event: {entries[0] if entries else 'EMPTY'}")
     except Exception as e:
         logger.warning("FMP dividend fetch failed for %s: %s", ticker, e)
         return []
@@ -179,12 +201,15 @@ def _fetch_fmp_dividends(ticker: str) -> list[dict]:
         adj_div = entry.get("adjDividend")
         if adj_div is None:
             adj_div = entry.get("dividend", 0)
+        # Extract FMP frequency string (e.g. "monthly", "quarterly")
+        fmp_freq_str = entry.get("frequency") or ""
         results.append({
             "ex_dividend_date": ex_date,
             "declaration_date": _parse_date(entry.get("declarationDate")),
             "record_date": _parse_date(entry.get("recordDate")),
             "payment_date": _parse_date(entry.get("paymentDate")),
             "dividend_per_share": float(adj_div or 0),
+            "fmp_frequency": fmp_freq_str.lower().strip(),
         })
     return sorted(results, key=lambda x: x["ex_dividend_date"])
 
@@ -219,29 +244,45 @@ def _amounts_agree(a1: Optional[float], a2: Optional[float], tolerance: float = 
     return abs(a1 - a2) <= tolerance
 
 
-def _detect_frequency(ex_dates: list[dt.date]) -> int:
-    """Detect distribution frequency from a list of ex-dividend dates."""
+def _detect_frequency(
+    ex_dates: list[dt.date],
+    fmp_frequency_str: str = "",
+) -> tuple[int, str]:
+    """Detect distribution frequency.
+
+    Checks the FMP ``frequency`` field first. If it maps to a known
+    value ("monthly" -> 12, etc.) return it with source "FMP".
+    Otherwise fall back to median-gap detection with source "Calculated".
+
+    Returns ``(distributions_per_year, frequency_source)``.
+    """
+    # --- Try FMP frequency field first ---
+    if fmp_frequency_str:
+        fmp_dpy = _FMP_FREQUENCY_MAP.get(fmp_frequency_str.lower().strip())
+        if fmp_dpy is not None:
+            return fmp_dpy, "FMP"
+
+    # --- Fallback: median-gap detection ---
     if len(ex_dates) < 2:
-        return 0
-    # Use trailing 12 months
+        return 0, "Calculated"
     one_year_ago = dt.date.today() - dt.timedelta(days=365)
     recent = [d for d in sorted(ex_dates) if d >= one_year_ago]
     if len(recent) < 2:
         recent = sorted(ex_dates)[-6:]
     if len(recent) < 2:
-        return 0
+        return 0, "Calculated"
 
     gaps = [(recent[i + 1] - recent[i]).days for i in range(len(recent) - 1)]
     median_gap = sorted(gaps)[len(gaps) // 2]
 
     if median_gap <= 35:
-        return 12
+        return 12, "Calculated"
     elif median_gap <= 95:
-        return 4
+        return 4, "Calculated"
     elif median_gap <= 200:
-        return 2
+        return 2, "Calculated"
     else:
-        return 1
+        return 1, "Calculated"
 
 
 def _estimate_payment_date(ex_date: dt.date, frequency: int) -> dt.date:
@@ -288,10 +329,14 @@ def get_verified_dividend_events(
             continue
         fmp_lookup[ex_d] = fd
 
-    # --- Build DividendEvents from yfinance as the date index ---
+    # --- Detect frequency: try FMP frequency field first, then median-gap ---
     events: list[DividendEvent] = []
     all_ex_dates = [d["ex_dividend_date"] for d in yf_divs]
-    frequency = _detect_frequency(all_ex_dates)
+    # Get the FMP frequency string from the most recent FMP entry (if any)
+    fmp_freq_str = ""
+    if fmp_divs:
+        fmp_freq_str = fmp_divs[-1].get("fmp_frequency", "")
+    frequency, frequency_source = _detect_frequency(all_ex_dates, fmp_freq_str)
 
     for yf_div in yf_divs:
         ex_date = yf_div["ex_dividend_date"]
@@ -302,6 +347,7 @@ def get_verified_dividend_events(
             ex_dividend_date=ex_date,
             distribution_per_share=yf_amount,
             frequency=frequency,
+            frequency_source=frequency_source,
             amount_source="yfinance",
             yfinance_amount=yf_amount,
         )
@@ -337,6 +383,12 @@ def get_verified_dividend_events(
                 event.record_date = event.fmp_record_date
             if event.fmp_declaration_date:
                 event.declaration_date = event.fmp_declaration_date
+
+            if FMP_DEBUG:
+                print(f"[WATERFALL] {ticker} {ex_date}: "
+                      f"fmp_payment={event.fmp_payment_date}, "
+                      f"fmp_amount={event.fmp_amount}, "
+                      f"selected_source={event.payment_date_source}")
 
         # --- Fill missing payment date with estimate ---
         if event.payment_date is None:

@@ -140,6 +140,7 @@ def fetch_multiple_dividend_histories(
 _FMP_BASE = "https://financialmodelingprep.com/stable"
 _FMP_DAILY_LIMIT = 250
 _FMP_WARN_THRESHOLD = 240
+FMP_DEBUG = False
 
 
 def _get_fmp_api_key() -> Optional[str]:
@@ -153,7 +154,7 @@ def _get_fmp_api_key() -> Optional[str]:
     try:
         key = st.secrets["api_keys"]["FMP_API_KEY"]
         if key:
-            return str(key)
+            return str(key).strip()
     except (KeyError, FileNotFoundError, Exception):
         pass
     return None
@@ -191,13 +192,21 @@ def _parse_fmp_date(val) -> Optional[dt.date]:
         return None
 
 
+_FMP_FREQUENCY_MAP = {
+    "monthly": 12,
+    "quarterly": 4,
+    "semi-annual": 2,
+    "annual": 1,
+}
+
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_fmp_dividends(ticker: str, api_key: str) -> pd.DataFrame:
-    """Fetch dividend data from Financial Modeling Prep.
+    """Fetch dividend data from Financial Modeling Prep ``/stable/dividends``.
 
     Returns DataFrame with columns:
         ex_dividend_date, declaration_date, record_date, payment_date,
-        dividend_per_share, payment_date_source
+        dividend_per_share, payment_date_source, fmp_frequency
     All dates are ``datetime.date`` objects.
     Returns empty DataFrame when FMP is unavailable or has no data.
 
@@ -211,33 +220,43 @@ def fetch_fmp_dividends(ticker: str, api_key: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     url = f"{_FMP_BASE}/dividends"
+    if FMP_DEBUG:
+        redacted = api_key[:len(api_key) - 20] + "******" if len(api_key) > 20 else "******"
+        print(f"[FMP CALL] URL: {url}?symbol={ticker}&apikey={redacted}")
+        print(f"[FMP CALL] Ticker: {ticker}, Function: fetch_fmp_dividends")
     try:
         resp = _requests.get(
             url, params={"symbol": ticker, "apikey": api_key}, timeout=10,
         )
+        if FMP_DEBUG:
+            print(f"[FMP RESPONSE] Status code: {resp.status_code}")
+            print(f"[FMP RESPONSE] Raw body (first 500 chars): {resp.text[:500]}")
+        # Handle rate-limit or error responses
+        if resp.status_code == 429 or "Limit Reach" in resp.text:
+            logger.warning("FMP rate limit reached for %s", ticker)
+            return pd.DataFrame()
         if resp.status_code != 200:
             logger.warning("FMP dividends HTTP %s for %s", resp.status_code, ticker)
             return pd.DataFrame()
         data = resp.json()
-        # Handle FMP error responses
+        # Handle FMP error responses — stable API returns a flat list
         if isinstance(data, dict) and "Error Message" in data:
             logger.warning("FMP error for %s: %s", ticker, data["Error Message"])
             return pd.DataFrame()
-        # Stable API returns a flat list; legacy returned {"historical": [...]}
-        if isinstance(data, dict) and "historical" in data:
-            entries = data["historical"]
-        elif isinstance(data, list):
-            entries = data
-        else:
+        if not isinstance(data, list):
+            logger.warning("FMP unexpected response type for %s: %s", ticker, type(data).__name__)
             return pd.DataFrame()
+        entries = data
         if not entries:
             return pd.DataFrame()
+        if FMP_DEBUG:
+            print(f"[FMP PARSED] Events found: {len(entries)}")
+            print(f"[FMP PARSED] First event: {entries[0] if entries else 'EMPTY'}")
     except Exception:
         return pd.DataFrame()
 
     rows = []
     for entry in entries:
-        # FMP uses "date" for the ex-dividend date in this endpoint
         ex_date = _parse_fmp_date(entry.get("date"))
         if ex_date is None:
             continue
@@ -245,6 +264,8 @@ def fetch_fmp_dividends(ticker: str, api_key: str) -> pd.DataFrame:
         adj_div = entry.get("adjDividend")
         if adj_div is None:
             adj_div = entry.get("dividend", 0)
+        # Extract FMP frequency string (e.g. "monthly", "quarterly")
+        fmp_freq_str = entry.get("frequency") or ""
         rows.append({
             "ex_dividend_date": ex_date,
             "declaration_date": _parse_fmp_date(entry.get("declarationDate")),
@@ -252,6 +273,7 @@ def fetch_fmp_dividends(ticker: str, api_key: str) -> pd.DataFrame:
             "payment_date": _parse_fmp_date(entry.get("paymentDate")),
             "dividend_per_share": float(adj_div or 0),
             "payment_date_source": "FMP",
+            "fmp_frequency": fmp_freq_str.lower().strip(),
         })
 
     if not rows:
@@ -286,12 +308,26 @@ def test_fmp_connection() -> dict:
         return result
 
     try:
+        profile_url = f"{_FMP_BASE}/profile"
+        if FMP_DEBUG:
+            redacted = api_key[:len(api_key) - 20] + "******" if len(api_key) > 20 else "******"
+            print(f"[FMP CALL] URL: {profile_url}?symbol=SPY&apikey={redacted}")
+            print(f"[FMP CALL] Ticker: SPY, Function: test_fmp_connection")
         resp = _requests.get(
-            f"{_FMP_BASE}/profile",
+            profile_url,
             params={"symbol": "SPY", "apikey": api_key},
             timeout=10,
         )
         result["status_code"] = resp.status_code
+        if FMP_DEBUG:
+            print(f"[FMP RESPONSE] Status code: {resp.status_code}")
+            print(f"[FMP RESPONSE] Raw body (first 500 chars): {resp.text[:500]}")
+
+        # Handle rate-limit responses
+        if resp.status_code == 429 or "Limit Reach" in resp.text:
+            result["error_message"] = "FMP daily rate limit reached (server-side)"
+            result["rate_limit_remaining"] = 0
+            return result
 
         if resp.status_code == 200:
             data = resp.json()
@@ -304,7 +340,6 @@ def test_fmp_connection() -> dict:
             else:
                 result["connected"] = True
         elif resp.status_code == 403:
-            # Include response body for diagnostics
             body = ""
             try:
                 body = resp.text[:200]
@@ -320,6 +355,87 @@ def test_fmp_connection() -> dict:
         result["error_message"] = f"Connection error: {exc}"
         result["rate_limit_remaining"] = _fmp_requests_remaining()
         return result
+
+
+# ---------------------------------------------------------------------------
+# FMP historical EOD price
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_fmp_historical_price(
+    ticker: str,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+) -> pd.DataFrame:
+    """Fetch historical EOD prices from FMP ``/stable/historical-price-eod/full``.
+
+    Returns DataFrame with columns: date, open, high, low, close, volume, adjClose.
+    Sorted by date descending (most recent first).
+    Returns empty DataFrame when FMP is unavailable or has no data.
+    """
+    api_key = _get_fmp_api_key()
+    if _requests is None or not api_key:
+        return pd.DataFrame()
+    if not _fmp_rate_check():
+        return pd.DataFrame()
+
+    url = f"{_FMP_BASE}/historical-price-eod/full"
+    params: dict = {"symbol": ticker, "apikey": api_key}
+    if from_date:
+        params["from"] = from_date
+    if to_date:
+        params["to"] = to_date
+
+    if FMP_DEBUG:
+        redacted = api_key[:len(api_key) - 20] + "******" if len(api_key) > 20 else "******"
+        display_params = {k: v for k, v in params.items() if k != "apikey"}
+        print(f"[FMP CALL] URL: {url}?symbol={ticker}&apikey={redacted}")
+        print(f"[FMP CALL] Ticker: {ticker}, Function: fetch_fmp_historical_price, params={display_params}")
+    try:
+        resp = _requests.get(url, params=params, timeout=10)
+        if FMP_DEBUG:
+            print(f"[FMP RESPONSE] Status code: {resp.status_code}")
+            print(f"[FMP RESPONSE] Raw body (first 500 chars): {resp.text[:500]}")
+        if resp.status_code == 429 or "Limit Reach" in resp.text:
+            logger.warning("FMP rate limit reached for %s prices", ticker)
+            return pd.DataFrame()
+        if resp.status_code != 200:
+            logger.warning("FMP historical price HTTP %s for %s", resp.status_code, ticker)
+            return pd.DataFrame()
+        data = resp.json()
+        if isinstance(data, dict) and "Error Message" in data:
+            logger.warning("FMP price error for %s: %s", ticker, data["Error Message"])
+            return pd.DataFrame()
+        # Response: {"symbol": "...", "historical": [...]}
+        if isinstance(data, dict) and "historical" in data:
+            entries = data["historical"]
+        elif isinstance(data, list):
+            entries = data
+        else:
+            return pd.DataFrame()
+        if not entries:
+            return pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+
+    rows = []
+    for entry in entries:
+        d = _parse_fmp_date(entry.get("date"))
+        if d is None:
+            continue
+        rows.append({
+            "date": d,
+            "open": float(entry.get("open", 0)),
+            "high": float(entry.get("high", 0)),
+            "low": float(entry.get("low", 0)),
+            "close": float(entry.get("close", 0)),
+            "volume": int(entry.get("volume", 0)),
+            "adjClose": float(entry.get("adjClose", entry.get("close", 0))),
+        })
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows).sort_values("date", ascending=False).reset_index(drop=True)
+    return df
 
 
 # ---------------------------------------------------------------------------
