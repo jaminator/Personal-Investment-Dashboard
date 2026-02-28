@@ -11,7 +11,10 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import streamlit as st
-import yfinance as yf
+try:
+    import yfinance as yf
+except ImportError:  # curl_cffi build can fail on some platforms (e.g. Streamlit Cloud)
+    yf = None  # type: ignore[assignment]
 
 try:
     import requests as _requests
