@@ -42,7 +42,7 @@ _SEC_HEADERS = {
     "Accept-Encoding": "gzip, deflate",
 }
 
-_FMP_BASE = "https://financialmodelingprep.com/api/v3"
+_FMP_BASE = "https://financialmodelingprep.com/stable"
 
 # Known PIMCO closed-end fund tickers
 _PIMCO_CEF_TICKERS = {
@@ -166,26 +166,34 @@ def _fetch_fmp_dividends(ticker: str) -> list[dict]:
     if not _fmp_rate_check():
         return []
 
-    url = f"{_FMP_BASE}/historical-price-full/stock_dividend/{ticker}"
+    url = f"{_FMP_BASE}/dividends"
     try:
-        resp = _requests.get(url, params={"apikey": api_key}, timeout=10)
+        resp = _requests.get(
+            url, params={"symbol": ticker, "apikey": api_key}, timeout=10,
+        )
         if resp.status_code != 200:
+            logger.warning("FMP dividends HTTP %s for %s", resp.status_code, ticker)
             return []
         data = resp.json()
         # Handle FMP error responses
         if isinstance(data, dict) and "Error Message" in data:
             logger.warning("FMP error for %s: %s", ticker, data["Error Message"])
             return []
-        if isinstance(data, list) and len(data) == 0:
+        # Stable API returns a flat list; legacy returned {"historical": [...]}
+        if isinstance(data, dict) and "historical" in data:
+            entries = data["historical"]
+        elif isinstance(data, list):
+            entries = data
+        else:
             return []
-        if not data or "historical" not in data:
+        if not entries:
             return []
     except Exception as e:
         logger.warning("FMP dividend fetch failed for %s: %s", ticker, e)
         return []
 
     results = []
-    for entry in data["historical"]:
+    for entry in entries:
         ex_date = _parse_date(entry.get("date"))
         if ex_date is None:
             continue

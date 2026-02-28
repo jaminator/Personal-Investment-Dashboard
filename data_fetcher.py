@@ -137,7 +137,7 @@ def fetch_multiple_dividend_histories(
 # Dividend data — FMP fallback
 # ---------------------------------------------------------------------------
 
-_FMP_BASE = "https://financialmodelingprep.com/api/v3"
+_FMP_BASE = "https://financialmodelingprep.com/stable"
 _FMP_DAILY_LIMIT = 250
 _FMP_WARN_THRESHOLD = 240
 
@@ -210,25 +210,33 @@ def fetch_fmp_dividends(ticker: str, api_key: str) -> pd.DataFrame:
     if not _fmp_rate_check():
         return pd.DataFrame()
 
-    url = f"{_FMP_BASE}/historical-price-full/stock_dividend/{ticker}"
+    url = f"{_FMP_BASE}/dividends"
     try:
-        resp = _requests.get(url, params={"apikey": api_key}, timeout=10)
+        resp = _requests.get(
+            url, params={"symbol": ticker, "apikey": api_key}, timeout=10,
+        )
         if resp.status_code != 200:
+            logger.warning("FMP dividends HTTP %s for %s", resp.status_code, ticker)
             return pd.DataFrame()
         data = resp.json()
         # Handle FMP error responses
         if isinstance(data, dict) and "Error Message" in data:
             logger.warning("FMP error for %s: %s", ticker, data["Error Message"])
             return pd.DataFrame()
-        if isinstance(data, list) and len(data) == 0:
+        # Stable API returns a flat list; legacy returned {"historical": [...]}
+        if isinstance(data, dict) and "historical" in data:
+            entries = data["historical"]
+        elif isinstance(data, list):
+            entries = data
+        else:
             return pd.DataFrame()
-        if not data or "historical" not in data:
+        if not entries:
             return pd.DataFrame()
     except Exception:
         return pd.DataFrame()
 
     rows = []
-    for entry in data["historical"]:
+    for entry in entries:
         # FMP uses "date" for the ex-dividend date in this endpoint
         ex_date = _parse_fmp_date(entry.get("date"))
         if ex_date is None:
@@ -279,8 +287,8 @@ def test_fmp_connection() -> dict:
 
     try:
         resp = _requests.get(
-            f"{_FMP_BASE}/profile/SPY",
-            params={"apikey": api_key},
+            f"{_FMP_BASE}/profile",
+            params={"symbol": "SPY", "apikey": api_key},
             timeout=10,
         )
         result["status_code"] = resp.status_code
@@ -296,7 +304,13 @@ def test_fmp_connection() -> dict:
             else:
                 result["connected"] = True
         elif resp.status_code == 403:
-            result["error_message"] = "FMP key invalid or rate-limited (403)"
+            # Include response body for diagnostics
+            body = ""
+            try:
+                body = resp.text[:200]
+            except Exception:
+                pass
+            result["error_message"] = f"FMP key invalid or rate-limited (403). {body}".strip()
         else:
             result["error_message"] = f"FMP returned HTTP {resp.status_code}"
 

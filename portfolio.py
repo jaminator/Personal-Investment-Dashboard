@@ -287,12 +287,46 @@ class PortfolioConfig:
 # ---------------------------------------------------------------------------
 
 def default_portfolio() -> PortfolioConfig:
-    """60/40 SPY/AGG sample portfolio."""
+    """VO / PDI sample portfolio with a Modified Kelly sleeve."""
     pc = PortfolioConfig()
-    pc.holdings = [
-        Holding(ticker="SPY", shares=100, cost_basis=400.0, asset_class="Equity"),
-        Holding(ticker="AGG", shares=200, cost_basis=100.0, asset_class="Fixed Income"),
-    ]
+
+    # Current prices (as of Feb 2026)
+    vo_price = 307.06
+    pdi_price = 18.13
+
+    # PDI trailing dividend yield: $2.65 annual / $18.13 ≈ 14.62%
+    pdi_yield = 2.65 / pdi_price
+
+    # Weight formula: PDI weight = 12% / (12% + PDI yield)
+    pdi_weight = 0.12 / (0.12 + pdi_yield)
+    vo_weight = 1.0 - pdi_weight
+
+    total_value = 300_000.0
+
+    vo_shares = round(total_value * vo_weight / vo_price, 2)
+    pdi_shares = round(total_value * pdi_weight / pdi_price, 2)
+
+    vo = Holding(
+        ticker="VO", shares=vo_shares, cost_basis=vo_price,
+        asset_class="Equity",
+    )
+    pdi = Holding(
+        ticker="PDI", shares=pdi_shares, cost_basis=pdi_price,
+        asset_class="Fixed Income",
+    )
+    pc.holdings = [vo, pdi]
+
+    # Modified Kelly sleeve — PDI as debt, VO as equity, quarterly rebalancing
+    sleeve = Sleeve(
+        name="Modified Kelly",
+        holding_ids=[vo.id, pdi.id],
+        mode="B: Signal-Based (Kelly)",
+        bond_ticker="PDI",
+        stock_ticker="VO",
+        signal_frequency="Quarterly",
+    )
+    pc.sleeves = [sleeve]
+
     pc.contributions = [
         ContributionStream(amount=500.0, frequency="Monthly"),
     ]
