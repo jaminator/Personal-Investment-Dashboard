@@ -137,9 +137,10 @@ def fetch_multiple_dividend_histories(
 # Dividend data — FMP fallback
 # ---------------------------------------------------------------------------
 
-_FMP_BASE = "https://financialmodelingprep.com/stable"
+_FMP_BASE = "https://financialmodelingprep.com/api/v3"
 _FMP_DAILY_LIMIT = 250
 _FMP_WARN_THRESHOLD = 240
+FMP_DEBUG = False
 
 
 def _get_fmp_api_key() -> Optional[str]:
@@ -153,7 +154,7 @@ def _get_fmp_api_key() -> Optional[str]:
     try:
         key = st.secrets["api_keys"]["FMP_API_KEY"]
         if key:
-            return str(key)
+            return str(key).strip()
     except (KeyError, FileNotFoundError, Exception):
         pass
     return None
@@ -210,11 +211,22 @@ def fetch_fmp_dividends(ticker: str, api_key: str) -> pd.DataFrame:
     if not _fmp_rate_check():
         return pd.DataFrame()
 
-    url = f"{_FMP_BASE}/dividends"
+    url = f"{_FMP_BASE}/historical-price-full/stock_dividend/{ticker}"
+    if FMP_DEBUG:
+        redacted = api_key[:len(api_key) - 20] + "******" if len(api_key) > 20 else "******"
+        print(f"[FMP CALL] URL: {url}?apikey={redacted}")
+        print(f"[FMP CALL] Ticker: {ticker}, Function: fetch_fmp_dividends")
     try:
         resp = _requests.get(
-            url, params={"symbol": ticker, "apikey": api_key}, timeout=10,
+            url, params={"apikey": api_key}, timeout=10,
         )
+        if FMP_DEBUG:
+            print(f"[FMP RESPONSE] Status code: {resp.status_code}")
+            print(f"[FMP RESPONSE] Raw body (first 500 chars): {resp.text[:500]}")
+        # Handle rate-limit or error responses
+        if resp.status_code == 429 or "Limit Reach" in resp.text:
+            logger.warning("FMP rate limit reached for %s", ticker)
+            return pd.DataFrame()
         if resp.status_code != 200:
             logger.warning("FMP dividends HTTP %s for %s", resp.status_code, ticker)
             return pd.DataFrame()
@@ -223,7 +235,7 @@ def fetch_fmp_dividends(ticker: str, api_key: str) -> pd.DataFrame:
         if isinstance(data, dict) and "Error Message" in data:
             logger.warning("FMP error for %s: %s", ticker, data["Error Message"])
             return pd.DataFrame()
-        # Stable API returns a flat list; legacy returned {"historical": [...]}
+        # v3 API returns {"symbol": "...", "historical": [...]}
         if isinstance(data, dict) and "historical" in data:
             entries = data["historical"]
         elif isinstance(data, list):
@@ -232,6 +244,9 @@ def fetch_fmp_dividends(ticker: str, api_key: str) -> pd.DataFrame:
             return pd.DataFrame()
         if not entries:
             return pd.DataFrame()
+        if FMP_DEBUG:
+            print(f"[FMP PARSED] Events found: {len(entries)}")
+            print(f"[FMP PARSED] First event: {entries[0] if entries else 'EMPTY'}")
     except Exception:
         return pd.DataFrame()
 
@@ -286,12 +301,26 @@ def test_fmp_connection() -> dict:
         return result
 
     try:
+        profile_url = f"{_FMP_BASE}/profile/SPY"
+        if FMP_DEBUG:
+            redacted = api_key[:len(api_key) - 20] + "******" if len(api_key) > 20 else "******"
+            print(f"[FMP CALL] URL: {profile_url}?apikey={redacted}")
+            print(f"[FMP CALL] Ticker: SPY, Function: test_fmp_connection")
         resp = _requests.get(
-            f"{_FMP_BASE}/profile",
-            params={"symbol": "SPY", "apikey": api_key},
+            profile_url,
+            params={"apikey": api_key},
             timeout=10,
         )
         result["status_code"] = resp.status_code
+        if FMP_DEBUG:
+            print(f"[FMP RESPONSE] Status code: {resp.status_code}")
+            print(f"[FMP RESPONSE] Raw body (first 500 chars): {resp.text[:500]}")
+
+        # Handle rate-limit responses
+        if resp.status_code == 429 or "Limit Reach" in resp.text:
+            result["error_message"] = "FMP daily rate limit reached (server-side)"
+            result["rate_limit_remaining"] = 0
+            return result
 
         if resp.status_code == 200:
             data = resp.json()
@@ -304,7 +333,6 @@ def test_fmp_connection() -> dict:
             else:
                 result["connected"] = True
         elif resp.status_code == 403:
-            # Include response body for diagnostics
             body = ""
             try:
                 body = resp.text[:200]

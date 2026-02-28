@@ -31,7 +31,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-_FMP_BASE = "https://financialmodelingprep.com/stable"
+_FMP_BASE = "https://financialmodelingprep.com/api/v3"
+FMP_DEBUG = False
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +114,7 @@ def _get_fmp_api_key() -> Optional[str]:
     try:
         key = st.secrets["api_keys"]["FMP_API_KEY"]
         if key:
-            return str(key)
+            return str(key).strip()
     except (KeyError, FileNotFoundError, Exception):
         pass
     return None
@@ -144,11 +145,22 @@ def _fetch_fmp_dividends(ticker: str) -> list[dict]:
     if not _fmp_rate_check():
         return []
 
-    url = f"{_FMP_BASE}/dividends"
+    url = f"{_FMP_BASE}/historical-price-full/stock_dividend/{ticker}"
+    if FMP_DEBUG:
+        redacted = api_key[:len(api_key) - 20] + "******" if len(api_key) > 20 else "******"
+        print(f"[FMP CALL] URL: {url}?apikey={redacted}")
+        print(f"[FMP CALL] Ticker: {ticker}, Function: _fetch_fmp_dividends")
     try:
         resp = _requests.get(
-            url, params={"symbol": ticker, "apikey": api_key}, timeout=10,
+            url, params={"apikey": api_key}, timeout=10,
         )
+        if FMP_DEBUG:
+            print(f"[FMP RESPONSE] Status code: {resp.status_code}")
+            print(f"[FMP RESPONSE] Raw body (first 500 chars): {resp.text[:500]}")
+        # Handle rate-limit or error responses
+        if resp.status_code == 429 or "Limit Reach" in resp.text:
+            logger.warning("FMP rate limit reached for %s", ticker)
+            return []
         if resp.status_code != 200:
             logger.warning("FMP dividends HTTP %s for %s", resp.status_code, ticker)
             return []
@@ -157,7 +169,7 @@ def _fetch_fmp_dividends(ticker: str) -> list[dict]:
         if isinstance(data, dict) and "Error Message" in data:
             logger.warning("FMP error for %s: %s", ticker, data["Error Message"])
             return []
-        # Stable API returns a flat list; legacy returned {"historical": [...]}
+        # v3 API returns {"symbol": "...", "historical": [...]}
         if isinstance(data, dict) and "historical" in data:
             entries = data["historical"]
         elif isinstance(data, list):
@@ -166,6 +178,9 @@ def _fetch_fmp_dividends(ticker: str) -> list[dict]:
             return []
         if not entries:
             return []
+        if FMP_DEBUG:
+            print(f"[FMP PARSED] Events found: {len(entries)}")
+            print(f"[FMP PARSED] First event: {entries[0] if entries else 'EMPTY'}")
     except Exception as e:
         logger.warning("FMP dividend fetch failed for %s: %s", ticker, e)
         return []
@@ -337,6 +352,12 @@ def get_verified_dividend_events(
                 event.record_date = event.fmp_record_date
             if event.fmp_declaration_date:
                 event.declaration_date = event.fmp_declaration_date
+
+            if FMP_DEBUG:
+                print(f"[WATERFALL] {ticker} {ex_date}: "
+                      f"fmp_payment={event.fmp_payment_date}, "
+                      f"fmp_amount={event.fmp_amount}, "
+                      f"selected_source={event.payment_date_source}")
 
         # --- Fill missing payment date with estimate ---
         if event.payment_date is None:
