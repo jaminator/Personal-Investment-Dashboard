@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "fmp": {
+      "type": "sse",
+      "url": "https://financialmodelingprep.com/mcp?apikey=QiJCMmVxJzWIkkwLg4svrFAkLwTigQRN"
+    }
+  }
+}
