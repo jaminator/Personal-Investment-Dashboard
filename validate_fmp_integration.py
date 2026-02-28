@@ -301,6 +301,102 @@ def test_e_verifier_secrets():
     st.session_state.clear()
 
 
+# ===== Test F: Stable API endpoints ==========================================
+def test_f_stable_endpoints():
+    print("\n=== Test F: Stable API endpoints ===")
+
+    import inspect
+    import data_fetcher
+    import dividend_verifier
+
+    # F1 — data_fetcher base URL
+    if data_fetcher._FMP_BASE == "https://financialmodelingprep.com/stable":
+        log("PASS", f"F1: data_fetcher._FMP_BASE = {data_fetcher._FMP_BASE}")
+    else:
+        log("FAIL", f"F1: Expected /stable base, got {data_fetcher._FMP_BASE!r}")
+
+    # F2 — dividend_verifier base URL
+    if dividend_verifier._FMP_BASE == "https://financialmodelingprep.com/stable":
+        log("PASS", f"F2: dividend_verifier._FMP_BASE = {dividend_verifier._FMP_BASE}")
+    else:
+        log("FAIL", f"F2: Expected /stable base, got {dividend_verifier._FMP_BASE!r}")
+
+    # F3 — data_fetcher dividend URL uses /dividends with symbol param
+    df_src = inspect.getsource(data_fetcher.fetch_fmp_dividends)
+    if "/dividends" in df_src and '"symbol"' in df_src:
+        log("PASS", "F3: data_fetcher uses /dividends?symbol={ticker}")
+    else:
+        log("FAIL", "F3: data_fetcher should use /dividends with symbol param")
+
+    # F4 — dividend_verifier dividend URL uses /dividends with symbol param
+    dv_src = inspect.getsource(dividend_verifier._fetch_fmp_dividends)
+    if "/dividends" in dv_src and '"symbol"' in dv_src:
+        log("PASS", "F4: dividend_verifier uses /dividends?symbol={ticker}")
+    else:
+        log("FAIL", "F4: dividend_verifier should use /dividends with symbol param")
+
+    # F5 — Profile URL uses /profile with symbol param
+    conn_src = inspect.getsource(data_fetcher.test_fmp_connection)
+    if "/profile" in conn_src and '"symbol"' in conn_src:
+        log("PASS", "F5: test_fmp_connection uses /profile?symbol=SPY")
+    else:
+        log("FAIL", "F5: test_fmp_connection should use /profile with symbol param")
+
+    # F6 — Historical price endpoint exists
+    if hasattr(data_fetcher, "fetch_fmp_historical_price"):
+        hp_src = inspect.getsource(data_fetcher.fetch_fmp_historical_price)
+        if "historical-price-eod/full" in hp_src:
+            log("PASS", "F6: fetch_fmp_historical_price uses /historical-price-eod/full")
+        else:
+            log("FAIL", "F6: fetch_fmp_historical_price should use /historical-price-eod/full")
+    else:
+        log("FAIL", "F6: fetch_fmp_historical_price function not found")
+
+    # F7 — Frequency field extracted in data_fetcher
+    if "fmp_frequency" in df_src and '"frequency"' in df_src:
+        log("PASS", "F7: data_fetcher extracts FMP frequency field")
+    else:
+        log("FAIL", "F7: data_fetcher should extract FMP frequency field")
+
+    # F8 — Frequency field extracted in dividend_verifier
+    if "fmp_frequency" in dv_src and '"frequency"' in dv_src:
+        log("PASS", "F8: dividend_verifier extracts FMP frequency field")
+    else:
+        log("FAIL", "F8: dividend_verifier should extract FMP frequency field")
+
+    # F9 — _detect_frequency accepts fmp_frequency_str param
+    df_sig = inspect.signature(dividend_verifier._detect_frequency)
+    if "fmp_frequency_str" in df_sig.parameters:
+        log("PASS", "F9: _detect_frequency accepts fmp_frequency_str param")
+    else:
+        log("FAIL", "F9: _detect_frequency should accept fmp_frequency_str param")
+
+    # F10 — _detect_frequency returns (int, str) tuple
+    result = dividend_verifier._detect_frequency([], "monthly")
+    if isinstance(result, tuple) and len(result) == 2:
+        dpy, src = result
+        if dpy == 12 and src == "FMP":
+            log("PASS", f"F10: _detect_frequency('monthly') = ({dpy}, '{src}')")
+        else:
+            log("FAIL", f"F10: Expected (12, 'FMP'), got ({dpy}, {src!r})")
+    else:
+        log("FAIL", f"F10: _detect_frequency should return (int, str) tuple, got {result!r}")
+
+    # F11 — _detect_frequency falls back to Calculated
+    result = dividend_verifier._detect_frequency([], "")
+    if isinstance(result, tuple) and result[1] == "Calculated":
+        log("PASS", f"F11: _detect_frequency('') falls back to source='Calculated'")
+    else:
+        log("FAIL", f"F11: Expected fallback to 'Calculated', got {result!r}")
+
+    # F12 — DividendEvent has frequency_source field
+    ev = dividend_verifier.DividendEvent()
+    if hasattr(ev, "frequency_source"):
+        log("PASS", f"F12: DividendEvent.frequency_source = '{ev.frequency_source}'")
+    else:
+        log("FAIL", "F12: DividendEvent should have frequency_source field")
+
+
 # ===== Main =================================================================
 if __name__ == "__main__":
     print("=" * 60)
@@ -312,6 +408,7 @@ if __name__ == "__main__":
     test_c_adj_dividend()
     test_d_rate_limit()
     test_e_verifier_secrets()
+    test_f_stable_endpoints()
 
     print("\n" + "=" * 60)
     print(f"Results: {PASS} PASS, {FAIL} FAIL, {SKIP} SKIP")

@@ -145,7 +145,13 @@ def render_data_quality(config: PortfolioConfig) -> None:
             df = pd.DataFrame(rows)
             st.dataframe(df, width="stretch", hide_index=True)
 
-            # Show current verified yield
+            # Show frequency and yield
+            if recent:
+                freq = recent[0].frequency
+                freq_src = recent[0].frequency_source
+                freq_label = {12: "Monthly", 4: "Quarterly", 2: "Semi-Annual", 1: "Annual"}.get(freq, "Unknown")
+                st.caption(f"Frequency: {freq_label} ({freq}x/year) — source: {freq_src}")
+
             vy = compute_annualized_yield(t)
             if vy is not None:
                 st.caption(f"Verified annualized yield: {vy:.2%}")
